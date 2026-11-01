@@ -21,7 +21,8 @@ fn main() {
         [m, w] | [m, w, _] => (m.as_str(), w.as_str()),
         _ => std::process::exit(2),
     };
-    if lockdown().is_err() {
+    if let Err(e) = lockdown() {
+        eprintln!("lockdown failed: {e}");
         std::process::exit(70);
     }
     match (mode, what) {

@@ -9,13 +9,13 @@
 //! or file-backed memory, signalling other processes and every other
 //! syscall kill the process immediately.
 //!
-//! Other Unix (macOS): the same resource limits, no syscall filter. The GUI
+//! Other Unix (macOS): the same resource limits except the address-space
+//! cap (macOS doesn't support or enforce it; the decoder's own 1 GB
+//! allocation budget still applies), no syscall filter. The GUI
 //! app bundle additionally runs under the App Sandbox, which its child
 //! processes inherit; the separately shipped CLI does not.
 //! Windows: process isolation plus the parent's timeout and output caps
 //! only; a restricted token / job object is planned (SPEC section 11, M9).
-
-use printnest_model::limits::{DECODE_MEMORY_BYTES, DECODE_TIMEOUT_SECS};
 
 /// How strongly the worker is confined on this platform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,7 +80,8 @@ pub fn lockdown() -> Result<Confinement, LockdownError> {
 
 #[cfg(unix)]
 mod rlimits {
-    use super::{DECODE_MEMORY_BYTES, DECODE_TIMEOUT_SECS, LockdownError};
+    use super::LockdownError;
+    use printnest_model::limits::{DECODE_MEMORY_BYTES, DECODE_TIMEOUT_SECS};
     use rustix::process::{Resource, Rlimit, setrlimit};
 
     fn limit(res: Resource, value: u64) -> Result<(), LockdownError> {
@@ -95,7 +96,13 @@ mod rlimits {
     }
 
     pub(super) fn apply() -> Result<(), LockdownError> {
-        limit(Resource::As, DECODE_MEMORY_BYTES)?;
+        // macOS reserves far more address space than this at start-up and
+        // rejects the limit; it never enforced RLIMIT_AS anyway.
+        if cfg!(target_os = "macos") {
+            let _ = DECODE_MEMORY_BYTES;
+        } else {
+            limit(Resource::As, DECODE_MEMORY_BYTES)?;
+        }
         limit(Resource::Cpu, DECODE_TIMEOUT_SECS + 5)?;
         limit(Resource::Fsize, 0)?; // may not grow any file
         limit(Resource::Core, 0)?; // no core dumps containing photo data

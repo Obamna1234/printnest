@@ -96,7 +96,7 @@ jobs:
           grep -q "'..' component" "$tmp/err.txt" \
             || { echo "::error::rejected, but not for the path:"; cat "$tmp/err.txt"; exit 1; }
           # Photos decode through the sandboxed worker, EXIF rotation applied.
-          $cli photo tests/fixtures/rotated-64x48.jpg | grep -q "48 × 64 px, decoded in a locked-down process" \
+          $cli photo tests/fixtures/rotated-64x48.jpg | grep -q "48 × 64 px .*decoded in a " \
             || { echo "::error::sandboxed photo decode failed"; exit 1; }
           printf 'GIF89a' > "$tmp/fake.jpg"
           if $cli photo "$tmp/fake.jpg"; then

@@ -161,7 +161,12 @@ fn normal_work_still_runs_after_lockdown() {
         .env_clear()
         .output()
         .unwrap();
-    assert!(out.status.success(), "{:?}", out.status);
+    assert!(
+        out.status.success(),
+        "{:?}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(String::from_utf8_lossy(&out.stdout).starts_with("OK "));
 }
 

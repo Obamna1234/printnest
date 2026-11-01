@@ -17,7 +17,11 @@ pub const EXIT_IO: i32 = 72;
 /// Entry point for the worker process. Never returns.
 pub fn run() -> ! {
     // Lock down FIRST, before reading a single byte of untrusted input.
-    if lockdown().is_err() {
+    if let Err(e) = lockdown() {
+        // Says which step failed (no input has been read yet); the parent
+        // only reports "could not be set up".
+        let msg: String = e.to_string().chars().filter(char::is_ascii).collect();
+        let _ = writeln!(std::io::stderr(), "printnest worker: {msg}");
         std::process::exit(EXIT_LOCKDOWN_FAILED);
     }
     let code = match serve(&mut std::io::stdin().lock(), &mut std::io::stdout().lock()) {
