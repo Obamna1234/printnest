@@ -1,0 +1,6 @@
+[toolchain]
+# Pinned so every build (local, CI, release) uses the same compiler.
+# Bump deliberately in its own PR.
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

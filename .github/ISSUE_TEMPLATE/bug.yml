@@ -1,0 +1,30 @@
+name: Bug report
+description: Something doesn't work (for security problems use private reporting instead)
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: PrintNest version
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Windows, macOS, Linux]
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Please don't attach personal photos; describe them (size, format) instead.
+    validations:
+      required: true

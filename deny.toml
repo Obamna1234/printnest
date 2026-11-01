@@ -1,0 +1,97 @@
+# cargo-deny configuration. Changes to this file need CODEOWNERS review.
+# Run locally with: cargo deny check
+
+[graph]
+all-features = true
+# Only the desktop targets we ship. (The GUI stack pulls tokio in for
+# WebAssembly builds only; it never reaches these targets, and the ban list
+# below proves it on every PR.)
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+]
+
+[advisories]
+version = 2
+yanked = "deny"
+# Every ignore needs a reason and is re-checked when its dependency updates.
+ignore = [
+    # zvariant / zvariant_derive / zbus_names: "unmaintained" only because
+    # they were merged into zbus 6. Not a vulnerability. Pulled in by the
+    # Linux screen-reader bridge (accesskit_unix → zbus), which talks to the
+    # LOCAL session D-Bus only. Remove once accesskit moves to zbus 6.
+    { id = "RUSTSEC-2026-0370", reason = "merged into zbus 6; no vuln; waiting on accesskit" },
+    { id = "RUSTSEC-2026-0371", reason = "merged into zbus 6; no vuln; waiting on accesskit" },
+    { id = "RUSTSEC-2026-0372", reason = "merged into zbus 6; no vuln; waiting on accesskit" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "OFL-1.1",
+    "CC0-1.0",
+    "BSL-1.0",
+]
+# Narrow exceptions: allowed for one crate only, never globally.
+exceptions = [
+    # egui's built-in UI font (Ubuntu-Light) ships under the Ubuntu Font
+    # Licence 1.0: free to use and redistribute. Recorded in ASSETS.md.
+    { crate = "epaint_default_fonts", allow = ["Ubuntu-font-1.0"] },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Our own crates refer to each other by path; that is not a wildcard risk.
+allow-wildcard-paths = true
+highlight = "all"
+
+# The shipped app must have NO network capability (SPEC section 7, rule 1).
+# Any crate below appearing anywhere in the graph fails the build.
+deny = [
+    { name = "reqwest" },
+    { name = "hyper" },
+    { name = "hyper-util" },
+    { name = "h2" },
+    { name = "ureq" },
+    { name = "curl" },
+    { name = "curl-sys" },
+    { name = "isahc" },
+    { name = "surf" },
+    { name = "attohttpc" },
+    { name = "minreq" },
+    { name = "tokio" },
+    { name = "async-std" },
+    { name = "mio" },
+    { name = "socket2" },
+    { name = "trust-dns-resolver" },
+    { name = "hickory-resolver" },
+    { name = "openssl" },
+    { name = "openssl-sys" },
+    { name = "native-tls" },
+    { name = "rustls" },
+    { name = "tungstenite" },
+    { name = "websocket" },
+    { name = "sentry" },
+    { name = "self_update" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

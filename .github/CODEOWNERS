@@ -1,0 +1,25 @@
+# Every change needs review from a maintainer. Security-sensitive paths are
+# listed separately so the rule survives if the default line is changed.
+# scripts/setup-repo.sh replaces @OWNER with your GitHub username.
+
+*                               @OWNER
+
+# Security-critical: CI, release, supply chain, sandbox, limits, packaging.
+/.github/                       @OWNER
+/deny.toml                      @OWNER
+/rust-toolchain.toml            @OWNER
+/clippy.toml                    @OWNER
+/Cargo.toml                     @OWNER
+/Cargo.lock                     @OWNER
+/supply-chain/                  @OWNER
+/scripts/                       @OWNER
+/packaging/                     @OWNER
+/crates/model/src/limits.rs     @OWNER
+/crates/model/src/safe_path.rs  @OWNER
+/AGENTS.md                      @OWNER
+/SPEC.md                        @OWNER
+/CLAUDE.md                      @OWNER
+/.claude/                       @OWNER
+/.cargo/                        @OWNER
+build.rs                        @OWNER
+/SECURITY.md                    @OWNER

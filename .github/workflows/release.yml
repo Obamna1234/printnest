@@ -1,0 +1,351 @@
+# Release pipeline (SPEC section 8).
+#
+# Trigger: a version tag (vX.Y.Z) on a commit that is on main.
+# - Builds without caches (no cache poisoning of shipped binaries).
+# - Builds the Linux binary twice on separate runners and fails if the
+#   hashes differ (reproducibility check).
+# - Publishes checksums, Sigstore signatures, build-provenance attestations
+#   and a CycloneDX SBOM.
+# - Waits for a human to approve the `release` environment, then creates a
+#   DRAFT release. A human publishes it.
+#
+# No paid OS code signing: macOS builds are ad-hoc signed with the sandbox
+# entitlements; Windows builds are unsigned. See README "Verify your download".
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions: read-all
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  guard:
+    name: Tag is on main
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      epoch: ${{ steps.epoch.outputs.epoch }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Refuse tags that are not on main
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::Tag $GITHUB_REF_NAME is not on main"; exit 1; }
+      - name: Tag must be annotated and signed (verified by GitHub)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ref="$(gh api "repos/$REPO/git/ref/tags/$TAG")"
+          type="$(jq -r .object.type <<< "$ref")"
+          [ "$type" = "tag" ] \
+            || { echo "::error::$TAG is a lightweight tag; use: git tag -s $TAG -m ..."; exit 1; }
+          sha="$(jq -r .object.sha <<< "$ref")"
+          verified="$(gh api "repos/$REPO/git/tags/$sha" --jq .verification.verified)"
+          [ "$verified" = "true" ] \
+            || { echo "::error::$TAG signature is not verified by GitHub"; exit 1; }
+          echo "Tag $TAG is signed and verified."
+      - name: Tag matches Cargo.toml version
+        id: version
+        run: |
+          v="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          [ "v$v" = "$GITHUB_REF_NAME" ] \
+            || { echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $v"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: Source date for reproducible builds
+        id: epoch
+        run: echo "epoch=$(git log -1 --format=%ct)" >> "$GITHUB_OUTPUT"
+
+  gates:
+    name: Re-run security gates on the tagged commit
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Linux GUI build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libgl1-mesa-dev libx11-dev
+      - run: rustup show active-toolchain || rustup toolchain install
+      - name: Format, lint and test (no caches in release builds)
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo test --workspace --locked
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+      - uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2.88.1
+        with:
+          tool: cargo-audit@0.22.2,cargo-vet@0.10.3
+      - run: cargo audit --deny unsound --deny yanked
+      - run: cargo vet --locked
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: [guard, gates]
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { name: linux-x86_64,       os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu }
+          # Same image, separate machine: any difference means the build is
+          # not reproducible.
+          - { name: linux-x86_64-check, os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu }
+          - { name: macos-aarch64,      os: macos-latest,   target: aarch64-apple-darwin }
+          - { name: macos-x86_64,       os: macos-latest,   target: x86_64-apple-darwin }
+          - { name: windows-x86_64,     os: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      SOURCE_DATE_EPOCH: ${{ needs.guard.outputs.epoch }}
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        if: runner.os == 'Linux'
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Linux GUI build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libgl1-mesa-dev libx11-dev \
+            libgl1-mesa-dri strace xvfb
+      - name: Install pinned toolchain and target
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add ${{ matrix.target }}
+      - name: Build (reproducible flags)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export RUSTFLAGS="--remap-path-prefix=$PWD=/build --remap-path-prefix=$HOME=/home -C debuginfo=0"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            export RUSTFLAGS="$RUSTFLAGS -C target-feature=+crt-static -C control-flow-guard"
+          fi
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            # Keep symbols so the network scan can attribute every caller;
+            # stripped right after the scan.
+            export CARGO_PROFILE_RELEASE_STRIP=none
+          fi
+          cargo build --release --locked --target ${{ matrix.target }} -p printnest -p printnest-cli
+      - name: No-network scan of shipped binary, then strip
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release"
+          scripts/test-check-no-network.sh
+          scripts/check-no-network.sh "$bin/printnest" "$bin/printnest-cli"
+          scripts/check-no-network-runtime.sh "$bin/printnest" "$bin/printnest-cli"
+          strip --strip-all "$bin/printnest" "$bin/printnest-cli"
+      - name: Network-import report (macOS, report-only)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: |
+          bin="target/${{ matrix.target }}/release"
+          {
+            echo "### Network imports: ${{ matrix.name }}"
+            echo '```'
+            nm -u "$bin/printnest" "$bin/printnest-cli" \
+              | grep -E '_(getaddrinfo|gethostbyname|socket|connect|bind|listen|accept|sendto|recvfrom)$' \
+              || echo "none"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Network-import report (Windows, report-only)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $dumpbin = Get-ChildItem -Recurse "$vs\VC\Tools\MSVC" -Filter dumpbin.exe | Where-Object FullName -like '*Hostx64\x64*' | Select-Object -First 1
+          $out = foreach ($b in 'printnest.exe','printnest-cli.exe') {
+            & $dumpbin.FullName /imports "target/${{ matrix.target }}/release/$b" | Select-String -Pattern 'WS2_32|WSOCK32|WINHTTP|WININET|DNSAPI' }
+          "### Network imports: ${{ matrix.name }}`n``````n$(if ($out) { $out } else { 'none' })`n``````" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="${{ needs.guard.outputs.version }}"
+          name="printnest-$v-${{ matrix.name }}"
+          bin="target/${{ matrix.target }}/release"
+          mkdir -p dist "stage/$name"
+          cp README.md SECURITY.md LICENSE-MIT LICENSE-APACHE "stage/$name/"
+          case "${{ runner.os }}" in
+            Linux)
+              cp "$bin/printnest" "$bin/printnest-cli" "stage/$name/"
+              # Deterministic tarball: fixed owner, order and mtime.
+              tar --sort=name --owner=0 --group=0 --numeric-owner \
+                  --mtime="@$SOURCE_DATE_EPOCH" -C stage -cf - "$name" \
+                | gzip -n > "dist/$name.tar.gz"
+              ;;
+            macOS)
+              app="stage/$name/PrintNest.app"
+              mkdir -p "$app/Contents/MacOS"
+              cp "$bin/printnest" "$app/Contents/MacOS/PrintNest"
+              cp "$bin/printnest-cli" "stage/$name/"
+              sed "s/@VERSION@/$v/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+              # Free ad-hoc signature with App Sandbox + Hardened Runtime.
+              # The entitlements grant NO network access.
+              codesign --force --options runtime --timestamp=none \
+                --entitlements packaging/macos/entitlements.plist -s - "$app"
+              codesign --verify --strict "$app"
+              hdiutil create -volname "PrintNest $v" -srcfolder "stage/$name" \
+                -fs HFS+ -format UDZO "dist/$name.dmg"
+              ;;
+            Windows)
+              cp "$bin/printnest.exe" "$bin/printnest-cli.exe" "stage/$name/"
+              (cd stage && 7z a -tzip -mx=9 "../dist/$name-portable.zip" "$name" > /dev/null)
+              ;;
+          esac
+          ls -la dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  reproducible:
+    name: Reproducibility check
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: art
+      - name: Two independent Linux builds must match
+        run: |
+          set -euo pipefail
+          mkdir a b
+          tar -xzf art/linux-x86_64/*.tar.gz -C a
+          tar -xzf art/linux-x86_64-check/*.tar.gz -C b
+          for f in printnest printnest-cli; do
+            ha="$(sha256sum a/*/$f | cut -d' ' -f1)"
+            hb="$(sha256sum b/*/$f | cut -d' ' -f1)"
+            echo "$f: $ha vs $hb"
+            [ "$ha" = "$hb" ] || { echo "::error::$f is not reproducible"; exit 1; }
+          done
+
+  sbom:
+    name: SBOM
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup show active-toolchain || rustup toolchain install
+      - run: cargo install --locked cargo-cyclonedx --version 0.5.9
+      - name: Generate CycloneDX SBOM
+        run: |
+          # Default features = exactly what ships (not linux-screen-reader).
+          cargo cyclonedx --format json --spec-version 1.5
+          mkdir -p dist
+          cp apps/printnest/printnest.cdx.json "dist/printnest-${{ needs.guard.outputs.version }}.cdx.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Sign, attest and draft release
+    needs: [guard, gates, build, reproducible, sbom]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # A maintainer must approve this environment in the GitHub UI.
+    environment: release
+    permissions:
+      contents: write       # create the draft release
+      id-token: write       # keyless Sigstore signing + attestations
+      attestations: write   # GitHub build provenance
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: art
+      - name: Collect files (the -check build is only for comparison)
+        run: |
+          set -euo pipefail
+          rm -rf art/linux-x86_64-check
+          mkdir dist
+          find art -type f -exec cp {} dist/ \;
+          cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Keyless Sigstore signatures
+        run: |
+          set -euo pipefail
+          cd dist
+          for f in *; do
+            cosign sign-blob --yes --bundle "$f.sigstore.json" "$f" > /dev/null
+          done
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.dmg
+            dist/*.zip
+            dist/*.cdx.json
+            dist/SHA256SUMS
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          draft: true
+          prerelease: ${{ startsWith(needs.guard.outputs.version, '0.') }}
+          files: dist/*
+          fail_on_unmatched_files: true
+          body: |
+            ## Verify your download first
+
+            These builds are **not** OS code-signed (PrintNest doesn't pay for
+            certificates). Instead, every file is checksummed, Sigstore-signed
+            and has a GitHub build-provenance attestation:
+
+            ```sh
+            sha256sum -c SHA256SUMS --ignore-missing
+            gh attestation verify <file> --repo ${{ github.repository }}
+            ```
+
+            ## Then open it
+
+            - **macOS:** open the DMG, drag PrintNest to Applications, try to open
+              it once, then go to System Settings → Privacy & Security → Open Anyway.
+            - **Windows:** unzip, run `printnest.exe`; on the blue SmartScreen
+              box choose More info → Run anyway.
+            - **Linux:** `tar -xzf printnest-*.tar.gz && ./printnest-*/printnest`
+
+            Only download PrintNest from this Releases page.

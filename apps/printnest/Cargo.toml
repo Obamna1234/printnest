@@ -1,0 +1,47 @@
+[package]
+name = "printnest"
+description = "PrintNest: design photo books, prints, frames, calendars and gifts, offline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "printnest"
+path = "src/main.rs"
+
+[features]
+# Linux screen-reader support (AT-SPI over D-Bus). OFF by default: its D-Bus
+# library (zbus) always compiles in TCP transport code, which would break the
+# "no network code in the binary" guarantee that scripts/check-no-network.sh
+# enforces. Users who need a screen reader on Linux can build with
+#   cargo build --release -p printnest --features linux-screen-reader
+# (Flatpak builds, which run with networking unshared, may enable it later.)
+linux-screen-reader = ["eframe/accesskit"]
+
+[dependencies]
+printnest-model.workspace = true
+
+# Only the features we need. No "persistence" (no hidden state files), no
+# "wgpu", no web features. Resolver 3 keeps these per-target sets separate.
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.37", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "wayland",
+    "x11",
+] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+# Windows/macOS screen readers use OS accessibility APIs, no network code.
+eframe = { version = "0.37", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "accesskit",
+] }
+
+[lints]
+workspace = true

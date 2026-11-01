@@ -1,0 +1,145 @@
+# Security gates (SPEC sections 7, 8 and 10). Runs on every PR and nightly.
+name: Security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "41 18 * * *"   # nightly, catches new advisories
+  workflow_dispatch:
+
+permissions: read-all
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Licences, network-crate bans, advisories and crates.io-only sources.
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --all-features
+
+  audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2.88.1
+        with:
+          tool: cargo-audit@0.22.2
+      - name: RustSec advisory check
+        run: cargo audit --deny unsound --deny yanked
+
+  vet:
+    name: cargo-vet
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2.88.1
+        with:
+          tool: cargo-vet@0.10.3
+      # Every dependency must be audited (ours or an imported trusted audit)
+      # or listed as an exemption in supply-chain/config.toml (CODEOWNERS).
+      # A new or updated crate fails here until a human records a decision.
+      - run: cargo vet --locked
+
+  no-network:
+    name: No network code in binaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Linux GUI build dependencies, strace and Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libgl1-mesa-dev libx11-dev \
+            libgl1-mesa-dri strace xvfb
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: scan
+      - name: Build unstripped release binaries
+        env:
+          CARGO_PROFILE_RELEASE_STRIP: none
+        run: cargo build --release --locked -p printnest -p printnest-cli
+      - name: Scanner self-test (canaries that use the network must fail)
+        run: scripts/test-check-no-network.sh
+      - name: Static scan (imports, callers, raw syscalls, std::net)
+        run: scripts/check-no-network.sh target/release/printnest target/release/printnest-cli
+      - name: Runtime check (strace; only local Unix sockets allowed)
+        run: scripts/check-no-network-runtime.sh target/release/printnest target/release/printnest-cli
+
+  unsafe-free:
+    name: No unsafe in first-party code
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Workspace forbids unsafe and every crate inherits the lints
+        run: |
+          set -euo pipefail
+          grep -q '^unsafe_code = "forbid"' Cargo.toml
+          for m in crates/*/Cargo.toml apps/*/Cargo.toml; do
+            if ! grep -A1 '^\[lints\]' "$m" | grep -q 'workspace = true'; then
+              echo "::error::$m does not inherit workspace lints"; exit 1
+            fi
+          done
+          # Belt and braces: the compiler already refuses unsafe code.
+          if grep -rn --include='*.rs' -E '\bunsafe[[:space:]]*(\{|fn\b|impl\b|extern\b|trait\b)' crates apps; then
+            echo "::error::unsafe found in first-party code"; exit 1
+          fi
+          echo "OK"
+
+  codeql-actions:
+    name: Workflow security (CodeQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          languages: actions
+      - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          category: actions

@@ -1,0 +1,20 @@
+[package]
+name = "printnest-cli"
+description = "Headless PrintNest tool: list products, create and validate projects"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "printnest-cli"
+path = "src/main.rs"
+
+[dependencies]
+printnest-model.workspace = true
+
+[lints]
+workspace = true

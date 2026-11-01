@@ -1,0 +1,34 @@
+name: Build task
+description: A unit of work for a contributor or the coding agent (add the agent:build label to hand it to the agent)
+labels: [task]
+body:
+  - type: input
+    id: milestone
+    attributes:
+      label: Milestone
+      description: Which SPEC.md milestone this belongs to (e.g. M2 Safe import)
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should exist when this is done?
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Checkable statements, ideally each backed by a test.
+      value: |
+        - [ ]
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security notes
+      description: Untrusted input involved? Limits that apply? Paths touched? Write "none" if none.
+    validations:
+      required: true
