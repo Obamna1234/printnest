@@ -79,8 +79,10 @@ Repo layout:
 apps/printnest          desktop app (egui)
 apps/printnest-cli      headless validate/render/export (tests, CI)
 crates/model            units, catalogue, project schema   [built]
-crates/layout           pages, frames, auto-layout          [M3/M5]
-crates/render           rasteriser                          [M3]
+crates/layout           crop/ppi maths, hit-testing, snap,
+                        undo, edit helpers                  [M3; auto-layout M5]
+crates/document         project folder load/save, imports   [M3]
+crates/render           print rasteriser                    [M4]
 crates/imaging          decode + adjustments (in worker)    [M2]
 crates/export           JPEG, PDF/X, tiling, templates      [M4]
 crates/sandbox          worker process, IPC, limits         [M2]
@@ -182,8 +184,13 @@ Rules:
    not. Windows has process isolation, timeout and caps but no restricted
    token/job object yet (planned for M9). HEIC/RAW are not supported (no
    memory-safe decoder).
-4. **Data is data.** Project = zip + JSON manifest, versioned schema, unknown
-   fields rejected. No scripts, macros, HTML, remote URLs. SVG sanitised to
+4. **Data is data.** Project = a `Name.printnest/` folder holding
+   `project.json` (versioned schema, unknown fields rejected, bounded
+   lists) and `photos/` (copies of the photos used). Saves are atomic
+   (temp file + rename); every photo path is a validated relative path that
+   must resolve inside `photos/` with no symlinks on the way; a new project
+   never overwrites an existing folder. A single-file zip archive of the
+   folder arrives with M4. No scripts, macros, HTML, remote URLs. SVG sanitised to
    shapes/paths.
 5. **No unsafe** in first-party crates (`forbid`).
 6. **No panics on input**: `unwrap`/`expect`/`panic`/indexing denied.
@@ -225,7 +232,7 @@ Vulnerabilities: SECURITY.md, GitHub private reporting, 72 h acknowledgement,
   (B) PR + 1 code-owner approval, which a sole admin may bypass for their
   own PRs only; (C) only admins can create, move or delete `v*` tags.
   CODEOWNERS covers `.github/`, `.cargo/`, `build.rs`, `deny.toml`,
-  `supply-chain/`, scripts, packaging, limits and path validation.
+  `supply-chain/`, scripts, packaging, limits, path validation and project file access.
 - Actions pinned to full SHAs; `permissions: read-all` by default;
   no `pull_request_target` with PR checkout; harden-runner on build jobs.
 - Releases need a signed, annotated tag verified by GitHub; the release
@@ -273,6 +280,16 @@ a human test print per minor release.
 - **M2 Safe import** — sandbox worker, decoder limits, fuzzing, hostile corpus.
   [done in this repo; `printnest-cli photo` decodes through the sandbox]
 - **M3 Single-page editor** — canvas, frames, text, guides, undo, DPI badges.
+  [done in this repo: posters/prints/canvases etc. open in the editor;
+  photo frames with pan/zoom/rotate, text, snapping, undo/redo, ppi badges,
+  bleed/safe overlays, save/open project folders. Built-in file picker
+  (decision): native dialogs would mean D-Bus portals on Linux (the same
+  TCP-capable code as the screen-reader bridge) and shell extensions
+  loading into our process on Windows, so the app draws its own picker.
+  Photos decode on demand within a 768 MB texture budget; undo keeps at
+  most 200 steps or ~256 MB. Known gaps, moved to M4 with autosave and
+  backups: saving runs on the UI thread (large photos pause the window),
+  and very large text at high zoom re-renders slowly.]
 - **M4 Export v1** — kiosk JPEG, PDF/X, home print, preflight, golden tests.
   First public beta.
 - **M5 Photo books** — spreads, covers, spine, layouts, auto-layout.

@@ -273,6 +273,15 @@ impl Project {
         serde_json::to_string_pretty(self).map_err(|e| ProjectError::Parse(e.to_string()))
     }
 
+    /// Compact JSON (what project folders store, so a project that loads
+    /// always fits back under the manifest size limit when saved).
+    ///
+    /// # Errors
+    /// If serialisation fails (it cannot for a validated project).
+    pub fn to_json_compact(&self) -> Result<String, ProjectError> {
+        serde_json::to_string(self).map_err(|e| ProjectError::Parse(e.to_string()))
+    }
+
     /// Every distinct photo this project references.
     #[must_use]
     pub fn photo_paths(&self) -> Vec<&SafePath> {

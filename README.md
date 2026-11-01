@@ -4,10 +4,10 @@
 canvases, calendars, cards and photo gifts.** Design on Windows, macOS or
 Linux, then print at home or take the file to a photo kiosk or print shop.
 
-> Status: **early development** (milestones 0–2 of 9). The app browses the
-> product catalogue, shows each product's print geometry and checks whether a
-> photo is sharp enough; `printnest-cli photo` reads real photos through the
-> sandbox. The editor arrives in milestone 3, export in milestone 4. See
+> Status: **early development** (milestones 0–3 of 9). You can pick a
+> product (poster, print, canvas, card…), lay out photos and text on it with
+> crop, rotate, snapping, undo and print-sharpness badges, and save/open
+> projects. Exporting print files arrives in milestone 4. See
 > [SPEC.md](SPEC.md) for the plan.
 
 ## Privacy and security promise
@@ -108,6 +108,8 @@ apps/printnest-cli    command-line tool (used by CI)
 crates/model          units, limits, safe paths, catalogue, project format
 crates/imaging        JPEG/PNG/WebP/TIFF decoding with hard limits
 crates/sandbox        locked-down decoder worker process (seccomp on Linux)
+crates/layout         crop/ppi maths, hit-testing, snapping, undo
+crates/document       project folders: safe load/save and photo import
 fuzz/                 cargo-fuzz targets (run in CI on nightly)
 catalogue/            product sizes (data)
 packaging/            macOS sandbox entitlements and bundle info

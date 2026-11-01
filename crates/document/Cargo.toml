@@ -1,0 +1,18 @@
+[package]
+name = "printnest-document"
+description = "PrintNest project folders: safe save and open"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+printnest-model.workspace = true
+printnest-sandbox.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

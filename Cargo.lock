@@ -2200,6 +2200,8 @@ name = "printnest"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "printnest-document",
+ "printnest-layout",
  "printnest-model",
  "printnest-sandbox",
 ]
@@ -2213,12 +2215,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "printnest-document"
+version = "0.1.0"
+dependencies = [
+ "printnest-model",
+ "printnest-sandbox",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "printnest-imaging"
 version = "0.1.0"
 dependencies = [
  "image",
  "printnest-model",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "printnest-layout"
+version = "0.1.0"
+dependencies = [
+ "printnest-model",
 ]
 
 [[package]]

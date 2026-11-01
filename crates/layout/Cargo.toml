@@ -1,0 +1,16 @@
+[package]
+name = "printnest-layout"
+description = "PrintNest editor logic: crop maths, hit testing, snapping, undo history"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+printnest-model.workspace = true
+
+[lints]
+workspace = true

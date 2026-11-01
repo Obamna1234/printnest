@@ -18,6 +18,9 @@ pub mod worker;
 
 pub use lockdown::Confinement;
 pub use parent::{SandboxError, WORKER_ARG, Worker, read_capped};
+/// What a preview request returns (re-exported so apps never need to
+/// depend on the decoder crate themselves).
+pub use printnest_imaging::{Info, Preview};
 
 /// Call first thing in `main` of any binary that can act as a worker:
 /// if the process was started as a worker, this serves one request and

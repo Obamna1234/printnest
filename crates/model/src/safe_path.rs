@@ -127,7 +127,9 @@ const RESERVED: &[&str] = &[
 
 /// Invisible formatting characters (Unicode category Cf and friends) and
 /// look-alikes that Windows best-fit mapping turns into path syntax.
-fn is_deceptive(c: char) -> bool {
+/// Also used to neutralise untrusted text before showing it in the UI.
+#[must_use]
+pub fn is_deceptive(c: char) -> bool {
     matches!(c,
         '\u{00AD}'                  // soft hyphen
         | '\u{034F}'                // combining grapheme joiner

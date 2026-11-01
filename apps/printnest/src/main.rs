@@ -1,21 +1,27 @@
 //! PrintNest desktop app.
 //!
-//! Milestone 0/1 window: browse the product catalogue, see each product's
-//! print geometry (trim, bleed, safe zone, wrap, mat, gutter, fold), work out
-//! book spines and check whether a photo is sharp enough to print.
-//!
-//! The full editor arrives in milestone 3. This window performs no file or
-//! network I/O at all.
+//! Start screen (pick a product) → editor (design it) → save as a project
+//! folder. Photos are decoded only in the sandboxed worker. No network I/O.
 
 #![forbid(unsafe_code)]
 // Hide the console window on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod editor;
+mod library;
+mod picker;
 mod preview;
+mod start;
 
+use editor::{Editor, Request};
 use eframe::egui;
-use printnest_model::catalogue::{Catalogue, Family, Product};
-use printnest_model::units::{Mm, PrintQuality, Size, grade_photo};
+use library::Origin;
+use picker::{Mode, Outcome, Picker, display_name};
+use printnest_document::{DocError, ProjectFolder};
+use printnest_model::catalogue::Catalogue;
+use printnest_model::project::{Page, Project};
+use printnest_model::safe_path::{SafePath, is_deceptive};
+use start::{StartAction, StartScreen};
 
 fn main() -> eframe::Result {
     // If started as the sandboxed photo decoder, serve one request and exit
@@ -23,342 +29,383 @@ fn main() -> eframe::Result {
     printnest_sandbox::maybe_run_worker();
     let catalogue = match Catalogue::builtin() {
         Ok(c) => c,
-        Err(e) => {
-            // Only reachable if the shipped catalogue is broken; tests prevent it.
-            return Err(eframe::Error::AppCreation(Box::new(e)));
-        }
+        Err(e) => return Err(eframe::Error::AppCreation(Box::new(e))),
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("PrintNest")
-            .with_inner_size([1180.0, 760.0])
-            .with_min_inner_size([820.0, 520.0]),
+            .with_inner_size([1280.0, 820.0])
+            .with_min_inner_size([900.0, 560.0]),
         ..Default::default()
     };
     eframe::run_native(
         "PrintNest",
         options,
-        Box::new(|_cc| Ok(Box::new(PrintNestApp::new(catalogue)))),
+        Box::new(|_cc| Ok(Box::new(App::new(catalogue)))),
     )
 }
 
-/// Options shown on the canvas.
-#[derive(Debug, Clone, Copy)]
-struct Overlays {
-    bleed: bool,
-    safe: bool,
-    extras: bool,
+/// What to do once the user confirms discarding unsaved changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterDiscard {
+    New,
+    Open,
+    Close,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickerFor {
+    Photos,
+    Open,
+    SaveAs,
 }
 
 #[derive(Debug)]
-struct PrintNestApp {
+struct App {
     catalogue: Catalogue,
-    family: Family,
-    product_id: String,
-    paper_id: String,
-    cover_id: String,
-    pages: u32,
-    photo_w: u32,
-    photo_h: u32,
-    overlays: Overlays,
+    start: StartScreen,
+    editor: Option<Editor>,
+    picker: Option<(PickerFor, Picker)>,
+    confirm: Option<AfterDiscard>,
+    message: Option<String>,
+    last_dir: Option<std::path::PathBuf>,
+    /// The user confirmed closing with unsaved changes.
+    closing: bool,
 }
 
-impl PrintNestApp {
+impl App {
     fn new(catalogue: Catalogue) -> Self {
-        let mut app = PrintNestApp {
+        App {
+            start: StartScreen::new(catalogue.clone()),
             catalogue,
-            family: Family::Book,
-            product_id: String::new(),
-            paper_id: String::new(),
-            cover_id: String::new(),
-            pages: 0,
-            photo_w: 4000,
-            photo_h: 3000,
-            overlays: Overlays {
-                bleed: true,
-                safe: true,
-                extras: true,
-            },
-        };
-        let first = app
-            .catalogue
-            .in_family(Family::Book)
-            .next()
-            .map(|p| p.id.clone());
-        if let Some(id) = first {
-            app.select(&id);
+            editor: None,
+            picker: None,
+            confirm: None,
+            message: None,
+            last_dir: None,
+            closing: false,
         }
-        app
     }
 
-    fn product(&self) -> Option<&Product> {
-        self.catalogue.product(&self.product_id)
-    }
-
-    /// Switches product and resets dependent choices to valid defaults.
-    fn select(&mut self, id: &str) {
-        let Some(p) = self.catalogue.product(id) else {
+    fn create(&mut self, product: &str, paper: &str, cover: Option<String>, pages: u32) {
+        let Some(prod) = self.catalogue.product(product).cloned() else {
             return;
         };
-        self.family = p.family;
-        self.product_id = p.id.clone();
-        self.paper_id = p.papers.first().cloned().unwrap_or_default();
-        self.cover_id = p.covers.first().map(|c| c.id.clone()).unwrap_or_default();
-        self.pages = p.default_pages();
+        let built = Project::new_blank(&self.catalogue, product, "Untitled").and_then(|mut p| {
+            p.paper = paper.to_owned();
+            p.cover = cover;
+            p.pages = (0..pages).map(|_| Page::default()).collect();
+            p.validate(&self.catalogue).map(|()| p)
+        });
+        match built {
+            Ok(p) => self.editor = Some(Editor::new(p, prod, None)),
+            Err(e) => self.message = Some(format!("Couldn't start that project: {e}")),
+        }
     }
 
-    fn sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
-        ui.heading("Products");
-        ui.add_space(4.0);
-        let mut picked: Option<String> = None;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for family in Family::ALL {
-                let open = family == self.family;
-                egui::CollapsingHeader::new(family.label())
-                    .id_salt(family.label())
-                    .open(if open { Some(true) } else { None })
-                    .show(ui, |ui| {
-                        for p in self.catalogue.in_family(family) {
-                            let selected = p.id == self.product_id;
-                            if ui.selectable_label(selected, &p.name).clicked() {
-                                picked = Some(p.id.clone());
+    fn open_project(&mut self, path: &std::path::Path) {
+        match printnest_document::open(path, &self.catalogue) {
+            Ok((folder, project)) => {
+                let Some(prod) = self.catalogue.product(&project.product).cloned() else {
+                    return;
+                };
+                self.last_dir = folder.root().parent().map(std::path::Path::to_path_buf);
+                self.editor = Some(Editor::new(project, prod, Some(folder)));
+            }
+            Err(e) => self.message = Some(format!("Couldn't open that project: {e}")),
+        }
+    }
+
+    /// Copies the photos the design uses into `folder` (from disk, or from
+    /// the project it was opened from), then writes project.json. A photo
+    /// counts as saved only once its copy succeeded; failures are shown.
+    fn save_into(&mut self, folder: ProjectFolder) {
+        let Some(ed) = self.editor.as_mut() else {
+            return;
+        };
+        let mut problems = Vec::new();
+        let mut missing = Vec::new();
+        let mut taken = ed.library.keys();
+        taken.extend(folder.photo_names());
+        let used: Vec<SafePath> = ed.project.photo_paths().into_iter().cloned().collect();
+        taken.extend(used.iter().map(|k| k.as_str().to_owned()));
+        for key in used {
+            let source = match ed.library.origin(key.as_str()) {
+                Some(Origin::Project(f)) if *f == folder => continue,
+                Some(origin) => origin.path(&key),
+                None => Err("not found".to_owned()),
+            };
+            // A photo already missing from the project it came from can't be
+            // copied; that's reported but doesn't block a clean save.
+            if let Ok(src) = &source
+                && std::fs::symlink_metadata(src).is_err()
+            {
+                missing.push(display_name(key.as_str()));
+                continue;
+            }
+            let result = source.and_then(|src| import_unique(&folder, &key, &src, &mut taken));
+            match result {
+                Ok(stored) => {
+                    if stored != key {
+                        ed.retarget_photo(&key, &stored);
+                    }
+                    ed.library.saved_as(&key, &stored, &folder);
+                }
+                Err(e) => problems.push(format!(
+                    "{}: {}",
+                    display_name(key.as_str()),
+                    display_name(&e)
+                )),
+            }
+        }
+        // Title from the folder name, minus anything that can't be shown.
+        let name: String = folder
+            .root()
+            .file_stem()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+            .chars()
+            .filter(|c| !c.is_control() && !is_deceptive(*c))
+            .take(200)
+            .collect();
+        if !name.trim().is_empty() {
+            ed.project.title = name;
+        }
+        match folder.save(&ed.project, &self.catalogue) {
+            Ok(()) => {
+                ed.folder = Some(folder);
+                if problems.is_empty() {
+                    ed.dirty = false;
+                    ed.status = "Saved.".into();
+                    if !missing.is_empty() {
+                        self.message = Some(format!(
+                            "Saved. These photos were already missing from the project \
+                             and still are:\n\n{}",
+                            missing.join("\n")
+                        ));
+                    }
+                } else {
+                    // Still unsaved: the next save retries the copies.
+                    ed.status = "Saved, but some photos are missing.".into();
+                    self.message = Some(format!(
+                        "The design was saved, but these photos couldn't be copied \
+                         into the project and will be missing when it's reopened:\n\n{}",
+                        problems.join("\n")
+                    ));
+                }
+            }
+            Err(e) => self.message = Some(format!("Couldn't save: {e}")),
+        }
+    }
+
+    /// `discard`: the user already agreed to lose unsaved changes. The
+    /// dirty flag is never cleared here, so cancelling the next dialog
+    /// keeps the protection.
+    fn handle(&mut self, req: Request, discard: bool) {
+        let dirty = !discard && self.editor.as_ref().is_some_and(|e| e.dirty);
+        match req {
+            Request::New if dirty => self.confirm = Some(AfterDiscard::New),
+            Request::New => self.editor = None,
+            Request::Open if dirty => self.confirm = Some(AfterDiscard::Open),
+            Request::Open => {
+                self.picker = Some((
+                    PickerFor::Open,
+                    Picker::new(Mode::Project, self.last_dir.clone()),
+                ))
+            }
+            Request::Save => {
+                if let Some(folder) = self.editor.as_ref().and_then(|e| e.folder.clone()) {
+                    self.save_into(folder);
+                } else {
+                    self.picker = Some((
+                        PickerFor::SaveAs,
+                        Picker::new(Mode::Save, self.last_dir.clone()),
+                    ));
+                }
+            }
+            Request::SaveAs => {
+                self.picker = Some((
+                    PickerFor::SaveAs,
+                    Picker::new(Mode::Save, self.last_dir.clone()),
+                ));
+            }
+            Request::AddPhotos => {
+                self.picker = Some((
+                    PickerFor::Photos,
+                    Picker::new(Mode::Photos, self.last_dir.clone()),
+                ));
+            }
+        }
+    }
+
+    fn dialogs(&mut self, ctx: &egui::Context) {
+        if let Some((purpose, picker)) = self.picker.as_mut() {
+            let purpose = *purpose;
+            match picker.show(ctx) {
+                Outcome::Pending => {}
+                Outcome::Cancelled => self.picker = None,
+                Outcome::Picked(paths) => {
+                    self.picker = None;
+                    self.last_dir = paths
+                        .first()
+                        .and_then(|p| p.parent())
+                        .map(std::path::Path::to_path_buf);
+                    match purpose {
+                        PickerFor::Photos => {
+                            if let Some(ed) = self.editor.as_mut() {
+                                ed.add_photo_files(paths);
                             }
                         }
-                    });
-            }
-        });
-        if let Some(id) = picked {
-            self.select(&id);
-        }
-    }
-
-    fn details(&mut self, ui: &mut egui::Ui) {
-        let Some(p) = self.product().cloned() else {
-            ui.label("Pick a product on the left.");
-            return;
-        };
-        ui.add_space(6.0);
-        ui.heading(&p.name);
-        ui.label(egui::RichText::new(p.family.label()).weak());
-        ui.add_space(8.0);
-
-        let trim = p.trim();
-        let art = p.artwork();
-        egui::Grid::new("geometry")
-            .num_columns(2)
-            .spacing([12.0, 4.0])
-            .show(ui, |ui| {
-                row(ui, "Finished size", &fmt_size(trim));
-                row(
-                    ui,
-                    "",
-                    &format!(
-                        "{:.2} × {:.2} in",
-                        trim.width.inches(),
-                        trim.height.inches()
-                    ),
-                );
-                row(ui, "Bleed", &p.bleed().to_string());
-                if let Some(w) = p.wrap_mm {
-                    row(ui, "Canvas wrap", &Mm(w).to_string());
-                }
-                row(ui, "Artwork size", &fmt_size(art));
-                row(
-                    ui,
-                    "Pixels at 300 ppi",
-                    &format!(
-                        "{} × {}",
-                        art.width.pixels_at(300.0),
-                        art.height.pixels_at(300.0)
-                    ),
-                );
-                row(ui, "Safe margin", &p.safe().to_string());
-                if let Some(m) = p.mat_opening {
-                    row(ui, "Mat opening", &fmt_size(m.to_mm()));
-                }
-                if let Some(g) = p.gutter_mm {
-                    row(ui, "Gutter", &Mm(g).to_string());
-                }
-                if let Some(b) = p.binding_mm {
-                    row(ui, "Binding margin", &Mm(b).to_string());
-                }
-            });
-
-        ui.add_space(10.0);
-        ui.separator();
-        ui.label(egui::RichText::new("Paper").strong());
-        egui::ComboBox::from_id_salt("paper")
-            .selected_text(
-                self.catalogue
-                    .paper(&self.paper_id)
-                    .map_or("—", |x| x.name.as_str()),
-            )
-            .width(220.0)
-            .show_ui(ui, |ui| {
-                for id in &p.papers {
-                    if let Some(paper) = self.catalogue.paper(id) {
-                        ui.selectable_value(&mut self.paper_id, id.clone(), &paper.name);
+                        PickerFor::Open => {
+                            if let Some(p) = paths.first() {
+                                self.open_project(&p.clone());
+                            }
+                        }
+                        PickerFor::SaveAs => {}
                     }
                 }
-            });
-
-        let rule = p.page_rule();
-        if rule.max > rule.min {
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new("Pages").strong());
-            ui.add(
-                egui::Slider::new(&mut self.pages, rule.min..=rule.max)
-                    .step_by(f64::from(rule.step)),
-            );
-        }
-
-        if !p.covers.is_empty() {
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new("Cover").strong());
-            ui.horizontal_wrapped(|ui| {
-                for c in &p.covers {
-                    ui.radio_value(&mut self.cover_id, c.id.clone(), &c.name);
-                }
-            });
-            if let Some(paper) = self.catalogue.paper(&self.paper_id)
-                && let (Some(spine), Some(spread)) = (
-                    p.spine_width(self.pages, paper, &self.cover_id),
-                    p.cover_spread(self.pages, paper, &self.cover_id),
-                )
-            {
-                ui.add_space(4.0);
-                egui::Grid::new("cover").num_columns(2).show(ui, |ui| {
-                    row(ui, "Spine width", &spine.to_string());
-                    row(ui, "Flat cover", &fmt_size(spread));
-                });
+                Outcome::SaveTo { parent, name } => match ProjectFolder::create(&parent, &name) {
+                    Ok(folder) => {
+                        self.picker = None;
+                        self.last_dir = Some(parent);
+                        self.save_into(folder);
+                    }
+                    Err(DocError::Exists) => {
+                        self.message = Some(
+                            "A project with that name already exists there. Pick another name."
+                                .into(),
+                        );
+                    }
+                    Err(e) => {
+                        self.message = Some(format!("Couldn't create the project folder: {e}"))
+                    }
+                },
             }
         }
 
-        ui.add_space(10.0);
-        ui.separator();
-        ui.label(egui::RichText::new("Will my photo print sharply?").strong());
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::DragValue::new(&mut self.photo_w)
-                    .range(1..=50_000)
-                    .suffix(" px"),
-            );
-            ui.label("×");
-            ui.add(
-                egui::DragValue::new(&mut self.photo_h)
-                    .range(1..=50_000)
-                    .suffix(" px"),
-            );
-        });
-        let art_oriented = orient(art, self.photo_w, self.photo_h);
-        if let Some((ppi, grade)) = grade_photo(
-            u64::from(self.photo_w),
-            u64::from(self.photo_h),
-            art_oriented,
-        ) {
-            let (colour, words) = match grade {
-                PrintQuality::Good => (egui::Color32::from_rgb(46, 160, 67), "Sharp"),
-                PrintQuality::Fair => (egui::Color32::from_rgb(210, 150, 20), "Acceptable"),
-                PrintQuality::Poor => (egui::Color32::from_rgb(210, 60, 50), "Likely blurry"),
-            };
-            ui.horizontal(|ui| {
-                let (dot, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                ui.painter().circle_filled(dot.center(), 5.0, colour);
-                ui.label(
-                    egui::RichText::new(format!("{words}: {ppi:.0} ppi full-bleed"))
-                        .color(colour)
-                        .strong(),
-                );
+        if let Some(after) = self.confirm {
+            egui::Modal::new(egui::Id::unique("confirm-discard")).show(ctx, |ui| {
+                ui.heading("Unsaved changes");
+                ui.label("This design has changes that aren't saved. Discard them?");
+                ui.horizontal(|ui| {
+                    if ui.button("Discard").clicked() {
+                        self.confirm = None;
+                        match after {
+                            AfterDiscard::New => self.handle(Request::New, true),
+                            AfterDiscard::Open => self.handle(Request::Open, true),
+                            AfterDiscard::Close => {
+                                self.closing = true;
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                        }
+                    }
+                    if ui.button("Keep editing").clicked() {
+                        self.confirm = None;
+                    }
+                });
             });
         }
 
-        ui.add_space(10.0);
-        ui.separator();
-        ui.label(egui::RichText::new("How you can print it").strong());
-        for e in &p.exports {
-            ui.label(format!("• {}", e.label()));
-        }
-        if !p.verified {
-            ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new(
-                    "Size not yet checked against a retailer. Confirm with your print shop.",
-                )
-                .weak()
-                .small(),
-            );
-        }
-    }
-
-    fn canvas(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut self.overlays.bleed, "Bleed");
-            ui.checkbox(&mut self.overlays.safe, "Safe zone");
-            ui.checkbox(&mut self.overlays.extras, "Wrap / mat / gutter / fold");
-        });
-        ui.add_space(4.0);
-        if let Some(p) = self.product().cloned() {
-            preview::draw(
-                ui,
-                &p,
-                self.overlays.bleed,
-                self.overlays.safe,
-                self.overlays.extras,
-            );
+        if let Some(msg) = self.message.clone() {
+            egui::Modal::new(egui::Id::unique("message")).show(ctx, |ui| {
+                ui.set_max_width(420.0);
+                ui.label(msg);
+                if ui.button("OK").clicked() {
+                    self.message = None;
+                }
+            });
         }
     }
 }
 
-impl eframe::App for PrintNestApp {
+impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        let title = match &self.editor {
+            Some(e) => format!(
+                "{}{} — PrintNest",
+                if e.dirty { "• " } else { "" },
+                display_name(&e.project.title)
+            ),
+            None => "PrintNest".into(),
+        };
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+
+        // Closing the window with unsaved changes asks first.
+        let dirty = self.editor.as_ref().is_some_and(|e| e.dirty);
+        if ctx.input(|i| i.viewport().close_requested()) && dirty && !self.closing {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.confirm = Some(AfterDiscard::Close);
+        }
+
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(
-                        "Offline · no network access · your photos never leave this computer",
+                        "Offline · no network access · photos are opened in a locked-down process",
                     )
                     .small(),
                 );
+                if let Some(ed) = &self.editor
+                    && !ed.status.is_empty()
+                {
+                    ui.separator();
+                    ui.label(egui::RichText::new(&ed.status).small());
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
-                        egui::RichText::new(format!(
-                            "PrintNest {} · editor arrives in milestone 3",
-                            env!("CARGO_PKG_VERSION")
-                        ))
-                        .small()
-                        .weak(),
+                        egui::RichText::new(format!("PrintNest {}", env!("CARGO_PKG_VERSION")))
+                            .small()
+                            .weak(),
                     );
                 });
             });
         });
-        egui::Panel::left("products")
-            .default_size(250.0)
-            .show(ui, |ui| self.sidebar(ui));
-        egui::Panel::right("details")
-            .default_size(300.0)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| self.details(ui));
-            });
-        egui::CentralPanel::default_margins().show(ui, |ui| self.canvas(ui));
+
+        let mut requests = Vec::new();
+        if let Some(ed) = self.editor.as_mut() {
+            requests = ed.ui(ui, &self.catalogue);
+        } else if let Some(action) = self.start.ui(ui) {
+            match action {
+                StartAction::Create {
+                    product,
+                    paper,
+                    cover,
+                    pages,
+                } => self.create(&product, &paper, cover, pages),
+                StartAction::Open => self.handle(Request::Open, false),
+            }
+        }
+        for r in requests {
+            self.handle(r, false);
+        }
+        self.dialogs(&ctx);
     }
 }
 
-fn row(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.label(egui::RichText::new(label).weak());
-    ui.label(value);
-    ui.end_row();
-}
-
-fn fmt_size(s: Size) -> String {
-    format!("{:.1} × {:.1} mm", s.width.0, s.height.0)
-}
-
-/// Rotates the artwork to match the photo's orientation.
-fn orient(art: Size, w: u32, h: u32) -> Size {
-    if (w >= h) == (art.width.0 >= art.height.0) {
-        art
-    } else {
-        Size::new(art.height, art.width)
+/// Copies `source` into `folder` as `key`, or the next free name if that
+/// name is already used on disk (never reusing an existing file).
+fn import_unique(
+    folder: &ProjectFolder,
+    key: &SafePath,
+    source: &std::path::Path,
+    taken: &mut std::collections::HashSet<String>,
+) -> Result<SafePath, String> {
+    let file_name = key.components().last().unwrap_or("photo.jpg").to_owned();
+    let mut dest = key.clone();
+    for _ in 0..50 {
+        match folder.import_photo(&dest, source) {
+            Ok(()) => {
+                taken.insert(dest.as_str().to_owned());
+                return Ok(dest);
+            }
+            Err(DocError::Exists) => {
+                taken.insert(dest.as_str().to_owned());
+                dest = printnest_layout::edit::photo_path(&file_name, taken)
+                    .ok_or_else(|| "no free file name".to_owned())?;
+            }
+            Err(e) => return Err(e.to_string()),
+        }
     }
+    Err("no free file name".into())
 }

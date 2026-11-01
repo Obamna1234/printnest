@@ -18,6 +18,7 @@
 /crates/model/src/safe_path.rs  @OWNER
 /crates/sandbox/                @OWNER
 /crates/imaging/                @OWNER
+/crates/document/               @OWNER
 /fuzz/                          @OWNER
 /AGENTS.md                      @OWNER
 /SPEC.md                        @OWNER
