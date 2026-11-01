@@ -36,14 +36,14 @@ Found a problem? Please report it privately: see [SECURITY.md](SECURITY.md).
 ## Download and verify
 
 Get builds only from this repo's
-[Releases](https://github.com/OWNER/printnest/releases) page.
+[Releases](https://github.com/Obamna1234/printnest/releases) page.
 
 PrintNest is **not** OS code-signed (no paid certificates), so verify the
 download first, then open it:
 
 ```sh
 sha256sum -c SHA256SUMS --ignore-missing
-gh attestation verify <downloaded-file> --repo OWNER/printnest
+gh attestation verify <downloaded-file> --repo Obamna1234/printnest
 ```
 
 - **macOS:** open the DMG, drag PrintNest to Applications, try to open it once,

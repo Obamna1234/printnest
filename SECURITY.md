@@ -43,7 +43,7 @@ running:
 sha256sum -c SHA256SUMS --ignore-missing
 
 # 2. Check it was built by this repo's release workflow
-gh attestation verify <downloaded-file> --repo OWNER/printnest
+gh attestation verify <downloaded-file> --repo Obamna1234/printnest
 ```
 
 Only download from this repository's GitHub Releases page (and Flathub for

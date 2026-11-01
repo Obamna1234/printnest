@@ -1,29 +1,29 @@
 # Every change needs review from a maintainer. Security-sensitive paths are
 # listed separately so the rule survives if the default line is changed.
-# scripts/setup-repo.sh replaces @OWNER with your GitHub username.
+# scripts/setup-repo.sh replaces @Obamna1234 with your GitHub username.
 
-*                               @OWNER
+*                               @Obamna1234
 
 # Security-critical: CI, release, supply chain, sandbox, limits, packaging.
-/.github/                       @OWNER
-/deny.toml                      @OWNER
-/rust-toolchain.toml            @OWNER
-/clippy.toml                    @OWNER
-/Cargo.toml                     @OWNER
-/Cargo.lock                     @OWNER
-/supply-chain/                  @OWNER
-/scripts/                       @OWNER
-/packaging/                     @OWNER
-/crates/model/src/limits.rs     @OWNER
-/crates/model/src/safe_path.rs  @OWNER
-/crates/sandbox/                @OWNER
-/crates/imaging/                @OWNER
-/crates/document/               @OWNER
-/fuzz/                          @OWNER
-/AGENTS.md                      @OWNER
-/SPEC.md                        @OWNER
-/CLAUDE.md                      @OWNER
-/.claude/                       @OWNER
-/.cargo/                        @OWNER
-build.rs                        @OWNER
-/SECURITY.md                    @OWNER
+/.github/                       @Obamna1234
+/deny.toml                      @Obamna1234
+/rust-toolchain.toml            @Obamna1234
+/clippy.toml                    @Obamna1234
+/Cargo.toml                     @Obamna1234
+/Cargo.lock                     @Obamna1234
+/supply-chain/                  @Obamna1234
+/scripts/                       @Obamna1234
+/packaging/                     @Obamna1234
+/crates/model/src/limits.rs     @Obamna1234
+/crates/model/src/safe_path.rs  @Obamna1234
+/crates/sandbox/                @Obamna1234
+/crates/imaging/                @Obamna1234
+/crates/document/               @Obamna1234
+/fuzz/                          @Obamna1234
+/AGENTS.md                      @Obamna1234
+/SPEC.md                        @Obamna1234
+/CLAUDE.md                      @Obamna1234
+/.claude/                       @Obamna1234
+/.cargo/                        @Obamna1234
+build.rs                        @Obamna1234
+/SECURITY.md                    @Obamna1234
