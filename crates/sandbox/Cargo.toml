@@ -1,0 +1,40 @@
+[package]
+name = "printnest-sandbox"
+description = "PrintNest sandboxed decoder worker: process isolation, seccomp, limits"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# Test-only helper that locks itself down and then tries forbidden things.
+# Never shipped: release builds only build the printnest and printnest-cli
+# packages.
+[[bin]]
+name = "sandbox-selftest"
+path = "src/bin/selftest.rs"
+test = false
+doc = false
+
+[dependencies]
+printnest-model.workspace = true
+printnest-imaging.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# seccomp-bpf filter builder from the rust-vmm project (used by Firecracker).
+seccompiler = "0.5.0"
+
+[target.'cfg(unix)'.dependencies]
+# Syscall numbers and O_/PROT_/MAP_ constants only (no unsafe in our code).
+libc = "0.2"
+# Safe setrlimit wrapper.
+rustix = { version = "1", default-features = false, features = ["std", "process"] }
+
+[dev-dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+
+[lints]
+workspace = true

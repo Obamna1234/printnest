@@ -1,0 +1,25 @@
+[package]
+name = "printnest-imaging"
+description = "PrintNest image decoding with hard limits (runs inside the sandboxed worker)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+printnest-model.workspace = true
+thiserror.workspace = true
+# Pure-Rust decoders only, and only the formats cameras, phones and kiosks
+# use. No default features: no rayon threads, no AVIF/EXR/GIF/... parsers.
+image = { version = "0.25.10", default-features = false, features = [
+    "jpeg",
+    "png",
+    "webp",
+    "tiff",
+] }
+
+[lints]
+workspace = true

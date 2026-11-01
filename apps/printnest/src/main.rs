@@ -18,6 +18,9 @@ use printnest_model::catalogue::{Catalogue, Family, Product};
 use printnest_model::units::{Mm, PrintQuality, Size, grade_photo};
 
 fn main() -> eframe::Result {
+    // If started as the sandboxed photo decoder, serve one request and exit
+    // before any window or GPU code runs.
+    printnest_sandbox::maybe_run_worker();
     let catalogue = match Catalogue::builtin() {
         Ok(c) => c,
         Err(e) => {

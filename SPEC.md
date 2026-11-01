@@ -158,9 +158,30 @@ Rules:
 2. **Least file access.** Only user-picked files/folders and the app's own
    config dir. Project paths are relative; `..`, absolute, symlink, UNC or
    device paths are rejected.
-3. **Hostile-file handling.** Decoding happens in a worker process with a
-   10 s timeout and 2 GB memory cap. Limits: 100 MP/image, 500 MB/file,
-   2,000 photos/project, ≤ 10,000 zip entries, uncompressed ≤ 20× compressed.
+3. **Hostile-file handling.** Photos are decoded only in a worker process
+   (`crates/sandbox`): the app reads the user-picked file (size-capped),
+   starts a copy of itself with one fixed argument and a cleared
+   environment, and sends the bytes over a pipe. The worker locks down
+   before reading any input. On Linux: 2 GB address-space cap, CPU, file-size
+   (0), core-dump (0) and open-file limits, and a seccomp allowlist with
+   argument checks: read only from fd 0, write only to fds 1-2, mmap only
+   anonymous and never executable, mprotect never executable, tgkill only to
+   itself with SIGABRT, plus exit, futex and a few signal/time calls. Any
+   other syscall or argument (open, socket, kill, clone/fork, execve, use of
+   inherited descriptors, x32/i386 ABIs) kills it. The parent enforces a
+   10 s timeout and an output cap, streams the photo without copying it,
+   refuses non-regular files without blocking, and validates every
+   field of the answer. Decoding (`crates/imaging`): format by magic bytes
+   (JPEG, PNG, WebP, TIFF only, pure-Rust decoders), file ≤ 500 MB, ≤ 100 MP,
+   ≤ 60,000 px per edge, 1 GB decoder allocation budget, preview shrunk
+   before EXIF orientation is applied (one full-size buffer at most). Other limits: 2,000 photos/project, ≤ 10,000 zip entries,
+   uncompressed ≤ 20× compressed (archives arrive with M4).
+   Platform gaps (the CLI says which level applies): macOS gets the same
+   resource limits but no syscall filter; the GUI bundle adds the App
+   Sandbox, which its worker inherits, but the separately shipped CLI does
+   not. Windows has process isolation, timeout and caps but no restricted
+   token/job object yet (planned for M9). HEIC/RAW are not supported (no
+   memory-safe decoder).
 4. **Data is data.** Project = zip + JSON manifest, versioned schema, unknown
    fields rejected. No scripts, macros, HTML, remote URLs. SVG sanitised to
    shapes/paths.
@@ -170,7 +191,9 @@ Rules:
 8. **Privacy defaults**: strip metadata, no usernames/machine IDs in files,
    "Clear all app data".
 9. **Safe output**: PDFs without JS/forms/attachments/launch actions/links.
-10. **No shelling out** and no command lines built from user data.
+10. **No shelling out** and no command lines built from user data. The one
+    process the app starts is its own decoder worker (fixed argument,
+    cleared environment, data over stdin only).
 
 OS hardening: macOS App Sandbox (`user-selected.read-write` only, no
 network), Hardened Runtime, ad-hoc signed; Windows unsigned portable zip
@@ -248,6 +271,7 @@ a human test print per minor release.
 - **M1 Model and catalogue** — units, catalogue TOML, project schema, CLI
   validate. [done in this repo]
 - **M2 Safe import** — sandbox worker, decoder limits, fuzzing, hostile corpus.
+  [done in this repo; `printnest-cli photo` decodes through the sandbox]
 - **M3 Single-page editor** — canvas, frames, text, guides, undo, DPI badges.
 - **M4 Export v1** — kiosk JPEG, PDF/X, home print, preflight, golden tests.
   First public beta.

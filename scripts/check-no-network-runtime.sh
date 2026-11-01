@@ -22,6 +22,9 @@ trace info "$cli" info book-20x20 --pages 40 > /dev/null
 trace dpi "$cli" dpi canvas-60x40 4000 3000 > /dev/null
 trace new "$cli" new print-6x4 --out "$work/p.json" > /dev/null
 trace val "$cli" validate "$work/p.json" > /dev/null
+# Photo decoding starts the sandboxed worker; strace -f follows it too.
+fixture="$(cd "$(dirname "$0")/.." && pwd)/tests/fixtures/rotated-64x48.jpg"
+trace photo "$cli" photo "$fixture" --product print-6x4 > /dev/null
 
 if command -v Xvfb >/dev/null; then
   echo "Tracing the GUI for 8 seconds on a virtual display"

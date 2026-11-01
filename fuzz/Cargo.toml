@@ -1,0 +1,61 @@
+[package]
+name = "printnest-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Separate workspace: built only by `cargo +nightly fuzz`, never shipped.
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+printnest-model = { path = "../crates/model" }
+printnest-imaging = { path = "../crates/imaging" }
+printnest-sandbox = { path = "../crates/sandbox" }
+
+[[bin]]
+name = "project_json"
+path = "fuzz_targets/project_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "safe_path"
+path = "fuzz_targets/safe_path.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "catalogue_toml"
+path = "fuzz_targets/catalogue_toml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "image_decode"
+path = "fuzz_targets/image_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "worker_response"
+path = "fuzz_targets/worker_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "worker_request"
+path = "fuzz_targets/worker_request.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,82 @@
+# Coverage-guided fuzzing with cargo-fuzz / libFuzzer (SPEC section 10).
+#
+# - PRs that touch parsing code: every target for 60 s.
+# - Nightly: every target for 10 min, with a persisted corpus.
+# Any crash fails the job. Treat a crash as a potential vulnerability: fix it
+# privately, add the input to the hostile corpus, and never paste it in a
+# public issue.
+name: Fuzz
+
+on:
+  pull_request:
+    paths:
+      - "crates/**"
+      - "fuzz/**"
+      - "catalogue/**"
+      - "Cargo.lock"
+  schedule:
+    - cron: "23 15 * * *"
+  workflow_dispatch:
+
+permissions: read-all
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned nightly (cargo-fuzz needs nightly). Bump deliberately.
+  NIGHTLY: nightly-2026-10-15
+
+jobs:
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [project_json, safe_path, catalogue_toml, image_decode, worker_response, worker_request]
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned nightly
+        run: rustup toolchain install "$NIGHTLY" --profile minimal
+      - uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2.88.1
+        with:
+          tool: cargo-fuzz@0.13.2
+      - name: Restore corpus
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: Seed corpus
+        run: |
+          mkdir -p "fuzz/corpus/${{ matrix.target }}"
+          case "${{ matrix.target }}" in
+            image_decode | worker_request) cp tests/fixtures/*.{jpg,png,webp,tiff} "fuzz/corpus/${{ matrix.target }}/" ;;
+            catalogue_toml) cp catalogue/products.toml "fuzz/corpus/catalogue_toml/" ;;
+          esac
+      - name: Fuzz
+        env:
+          SECONDS_TO_RUN: ${{ github.event_name == 'schedule' && '600' || '60' }}
+        run: |
+          cargo "+$NIGHTLY" fuzz run --fuzz-dir fuzz "${{ matrix.target }}" \
+            "fuzz/corpus/${{ matrix.target }}" -- \
+            -max_total_time="$SECONDS_TO_RUN" -rss_limit_mb=2560 -timeout=10
+      # Crash inputs are potential exploits. On a PUBLIC repo artifacts are
+      # downloadable by anyone, so they are only uploaded for private repos.
+      # On public repos: reproduce locally with the same target and fix
+      # privately (SECURITY.md); the log shows the crash location.
+      - name: Upload crashing inputs (private repos only)
+        if: failure() && github.event.repository.private
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          retention-days: 30

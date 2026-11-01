@@ -35,7 +35,12 @@ for tool in nm objdump awk; do
 done
 
 always_banned='^(getaddrinfo|freeaddrinfo|gai_strerror|getnameinfo|gethostbyname|gethostbyname2|gethostbyname_r|gethostbyaddr|res_init|res_query|res_search|res_nquery|res_nsearch|bind|listen|accept|accept4|sendto|recvfrom|getpeername)(@.*)?$'
-socket_calls='^(socket|connect|socketpair)(@.*)?$'
+# socketpair is NOT checked: on Linux it can only create a connected pair of
+# local sockets (AF_UNIX; the kernel refuses AF_INET/AF_INET6 with
+# EOPNOTSUPP), so it cannot reach any network. Rust's std references it
+# from Command::spawn (a fallback path), which starts the decoder worker. The runtime check
+# still requires every socketpair() it observes to be AF_UNIX.
+socket_calls='^(socket|connect)(@.*)?$'
 # The ONE allowed caller, as its exact v0-mangled symbol: crate root
 # `wayland_client` (any disambiguator hash), module `conn`, type
 # `Connection`, method `connect_to_env`. A function at any other path, such

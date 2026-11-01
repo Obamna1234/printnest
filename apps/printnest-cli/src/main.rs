@@ -1,9 +1,10 @@
 //! `printnest-cli`: headless PrintNest tool.
 //!
-//! Used by CI and by contributors to check catalogue data and project files
-//! without opening a window. No network, no shelling out; it only reads the
-//! file named on the command line and only writes the file named by `--out`
-//! (refusing to overwrite an existing file).
+//! Used by CI and by contributors to check catalogue data, project files and
+//! photos without opening a window. No network. It only reads the file named
+//! on the command line and only writes the file named by `--out` (refusing
+//! to overwrite an existing file). Photos are decoded in a sandboxed copy of
+//! this program (see `printnest-sandbox`); that is the only process it starts.
 
 #![forbid(unsafe_code)]
 // A CLI's job is to print.
@@ -25,6 +26,7 @@ USAGE:
     printnest-cli new <product> --out <file.json> [--title <text>]
     printnest-cli validate <file.json>
     printnest-cli dpi <product> <pixels-wide> <pixels-high>
+    printnest-cli photo <image-file> [--product <product>]
     printnest-cli --version | --help
 
 FAMILIES:
@@ -34,6 +36,8 @@ EXIT CODES:
     0 ok · 1 invalid input or file · 2 usage error";
 
 fn main() -> ExitCode {
+    // If started as the sandboxed decoder, serve one request and exit.
+    printnest_sandbox::maybe_run_worker();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match run(&args) {
         Ok(()) => ExitCode::SUCCESS,
@@ -113,6 +117,7 @@ fn run(args: &[String]) -> Result<(), Failure> {
         "new" => cmd_new(&catalogue, rest),
         "validate" => cmd_validate(&catalogue, rest),
         "dpi" => cmd_dpi(&catalogue, rest),
+        "photo" => cmd_photo(&catalogue, rest),
         other => Err(usage(format!("unknown command {other:?}"))),
     }
 }
@@ -324,5 +329,42 @@ fn cmd_dpi(catalogue: &Catalogue, args: &[String]) -> Result<(), Failure> {
         fmt_size(art),
         p.name
     );
+    Ok(())
+}
+
+fn cmd_photo(catalogue: &Catalogue, args: &[String]) -> Result<(), Failure> {
+    let (pos, flags) = parse_flags(args, &["product"])?;
+    let [path] = pos.as_slice() else {
+        return Err(usage("photo needs exactly one image file"));
+    };
+    let bytes = printnest_sandbox::read_capped(std::path::Path::new(path))
+        .map_err(|e| bad(format!("{path}: {e}")))?;
+    let worker = printnest_sandbox::Worker::current_exe().map_err(bad)?;
+    // A full decode (to a small preview) proves the whole file is readable,
+    // not just its header. It happens inside the sandbox.
+    let preview = worker
+        .preview(&bytes, 256)
+        .map_err(|e| bad(format!("{path}: {e}")))?;
+    let info = preview.info;
+    let mp = f64::from(info.width) * f64::from(info.height) / 1_000_000.0;
+    println!(
+        "{path}: {} {} × {} px ({mp:.1} MP), decoded {}",
+        info.format.name(),
+        info.width,
+        info.height,
+        printnest_sandbox::lockdown::expected().describe()
+    );
+    if let Some(id) = flag(&flags, "product") {
+        let p = product(catalogue, id)?;
+        let art = p.artwork();
+        let art = if (info.width >= info.height) == (art.width.0 >= art.height.0) {
+            art
+        } else {
+            Size::new(art.height, art.width)
+        };
+        let (ppi, grade) = grade_photo(u64::from(info.width), u64::from(info.height), art)
+            .ok_or_else(|| bad("product has no area"))?;
+        println!("  on {}: {ppi:.0} ppi full-bleed — {grade:?}", p.name);
+    }
     Ok(())
 }

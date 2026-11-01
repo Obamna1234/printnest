@@ -4,10 +4,11 @@
 canvases, calendars, cards and photo gifts.** Design on Windows, macOS or
 Linux, then print at home or take the file to a photo kiosk or print shop.
 
-> Status: **early development** (milestones 0–1 of 9). The app currently
-> browses the product catalogue, shows each product's print geometry and checks
-> whether a photo is sharp enough. The editor arrives in milestone 3, export in
-> milestone 4. See [SPEC.md](SPEC.md) for the plan.
+> Status: **early development** (milestones 0–2 of 9). The app browses the
+> product catalogue, shows each product's print geometry and checks whether a
+> photo is sharp enough; `printnest-cli photo` reads real photos through the
+> sandbox. The editor arrives in milestone 3, export in milestone 4. See
+> [SPEC.md](SPEC.md) for the plan.
 
 ## Privacy and security promise
 
@@ -22,8 +23,10 @@ touch your data or the outside world:**
 - **Your photos never leave your computer.** Exports strip GPS and camera
   metadata by default (from milestone 4).
 - **Hostile files can't take over the app.** Every file is size-limited and
-  strictly validated, paths inside project files can't escape the project
-  folder, and decoding moves into a sandboxed process in milestone 2.
+  strictly validated, and paths inside project files can't escape the
+  project folder. Photos are decoded in a separate, locked-down process: on
+  Linux the kernel kills it if it even tries to open a file, make a network
+  connection or start a program.
 - **Memory-safe Rust** with `unsafe` code forbidden in PrintNest's own crates.
 - **Every release is verifiable**: reproducible build, checksums, Sigstore
   signatures, GitHub build provenance and a full SBOM.
@@ -71,6 +74,7 @@ cargo run --release -p printnest            # desktop app
 cargo run --release -p printnest-cli -- catalogue
 cargo run --release -p printnest-cli -- info book-20x20 --pages 40
 cargo run --release -p printnest-cli -- dpi canvas-60x40 4000 3000
+cargo run --release -p printnest-cli -- photo my-photo.jpg --product poster-a3
 ```
 
 Before opening a PR:
@@ -102,6 +106,9 @@ a human approving every merge and release:
 apps/printnest        desktop app
 apps/printnest-cli    command-line tool (used by CI)
 crates/model          units, limits, safe paths, catalogue, project format
+crates/imaging        JPEG/PNG/WebP/TIFF decoding with hard limits
+crates/sandbox        locked-down decoder worker process (seccomp on Linux)
+fuzz/                 cargo-fuzz targets (run in CI on nightly)
 catalogue/            product sizes (data)
 packaging/            macOS sandbox entitlements and bundle info
 scripts/              repo setup, network scanners and their self-tests

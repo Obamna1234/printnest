@@ -1290,10 +1290,23 @@ checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
+ "image-webp",
  "moxcms",
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
+]
+
+[[package]]
+name = "image-webp"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
+dependencies = [
+ "byteorder-lite",
+ "quick-error",
 ]
 
 [[package]]
@@ -2188,6 +2201,7 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "printnest-model",
+ "printnest-sandbox",
 ]
 
 [[package]]
@@ -2195,6 +2209,16 @@ name = "printnest-cli"
 version = "0.1.0"
 dependencies = [
  "printnest-model",
+ "printnest-sandbox",
+]
+
+[[package]]
+name = "printnest-imaging"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "printnest-model",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -2205,6 +2229,19 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "toml",
+]
+
+[[package]]
+name = "printnest-sandbox"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "libc",
+ "printnest-imaging",
+ "printnest-model",
+ "rustix 1.1.6",
+ "seccompiler",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -2396,6 +2433,15 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "seccompiler"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4ae55de56877481d112a559bbc12667635fdaf5e005712fd4e2b2fa50ffc884"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "self_cell"

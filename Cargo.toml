@@ -2,9 +2,13 @@
 resolver = "3"
 members = [
     "crates/model",
+    "crates/imaging",
+    "crates/sandbox",
     "apps/printnest-cli",
     "apps/printnest",
 ]
+# Fuzz targets build with nightly + cargo-fuzz in their own workspace.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,6 +21,8 @@ publish = false
 
 [workspace.dependencies]
 printnest-model = { path = "crates/model" }
+printnest-imaging = { path = "crates/imaging" }
+printnest-sandbox = { path = "crates/sandbox" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }

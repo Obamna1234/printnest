@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 printnest-model.workspace = true
+printnest-sandbox.workspace = true
 
 [lints]
 workspace = true

@@ -16,6 +16,9 @@
 /packaging/                     @OWNER
 /crates/model/src/limits.rs     @OWNER
 /crates/model/src/safe_path.rs  @OWNER
+/crates/sandbox/                @OWNER
+/crates/imaging/                @OWNER
+/fuzz/                          @OWNER
 /AGENTS.md                      @OWNER
 /SPEC.md                        @OWNER
 /CLAUDE.md                      @OWNER

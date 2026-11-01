@@ -24,6 +24,7 @@ linux-screen-reader = ["eframe/accesskit"]
 
 [dependencies]
 printnest-model.workspace = true
+printnest-sandbox.workspace = true
 
 # Only the features we need. No "persistence" (no hidden state files), no
 # "wgpu", no web features. Resolver 3 keeps these per-target sets separate.

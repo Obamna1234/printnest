@@ -13,7 +13,9 @@ file, stop and comment on the issue instead of guessing.
   config/project directories.
 - Execute, eval or interpret anything loaded from a file (no scripts, macros,
   plugins, expressions).
-- Launch other processes or build shell commands from user data.
+- Launch other processes or build shell commands from user data. (The only
+  exception is the existing decoder worker in `crates/sandbox`, which
+  starts the app's own executable with a fixed argument. Don't add others.)
 - Decompile or copy closed-source software, file formats, templates or assets
   from any company. Do not use any company's name, logo or product names.
 - Add a dependency without justifying it in the PR; never add a network,
@@ -29,8 +31,10 @@ file, stop and comment on the issue instead of guessing.
 
 ## Always
 
-- Parse untrusted input in the sandbox worker (from M2), within the limits in
+- Decode photos only through `printnest_sandbox::Worker` (never call
+  `printnest_imaging` from app code directly), within the limits in
   `crates/model/src/limits.rs`.
+- Add a cargo-fuzz target (`fuzz/`) for any new parser.
 - Return errors, never panic, on bad input.
 - Add tests with every change: unit tests, a golden render for visual changes
   (from M4), a fuzz target for any new parser (from M2).
