@@ -1,0 +1,69 @@
+{
+  "name": "Main: checks, history and signatures",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": [
+        "~DEFAULT_BRANCH"
+      ],
+      "exclude": []
+    }
+  },
+  "bypass_actors": [],
+  "rules": [
+    {
+      "type": "deletion"
+    },
+    {
+      "type": "non_fast_forward"
+    },
+    {
+      "type": "required_linear_history"
+    },
+    {
+      "type": "required_signatures"
+    },
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": true,
+        "required_status_checks": [
+          {
+            "context": "Format"
+          },
+          {
+            "context": "Test (ubuntu-latest)"
+          },
+          {
+            "context": "Test (macos-latest)"
+          },
+          {
+            "context": "Test (windows-latest)"
+          },
+          {
+            "context": "Lockfile is up to date"
+          },
+          {
+            "context": "cargo-deny"
+          },
+          {
+            "context": "cargo-audit"
+          },
+          {
+            "context": "cargo-vet"
+          },
+          {
+            "context": "No network code in binaries"
+          },
+          {
+            "context": "No unsafe in first-party code"
+          },
+          {
+            "context": "Workflow security (CodeQL)"
+          }
+        ]
+      }
+    }
+  ]
+}
