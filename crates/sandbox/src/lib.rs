@@ -26,6 +26,7 @@ pub use printnest_imaging::{Info, Preview};
 /// if the process was started as a worker, this serves one request and
 /// exits; otherwise it returns immediately.
 pub fn maybe_run_worker() {
+    // nosemgrep: rust.lang.security.args-os.args-os -- only selects worker mode, which has fewer rights, never more
     let mut args = std::env::args_os().skip(1);
     if let (Some(first), None) = (args.next(), args.next())
         && first == WORKER_ARG

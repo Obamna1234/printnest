@@ -395,6 +395,7 @@ mod tests {
 
     #[test]
     fn lists_a_folder_with_filters() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir -- test-only scratch folder
         let d = std::env::temp_dir().join(format!("printnest-picker-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("sub")).unwrap();

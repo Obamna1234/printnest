@@ -15,6 +15,7 @@ use std::io::Write;
 
 fn main() {
     printnest_sandbox::maybe_run_worker();
+    // nosemgrep: rust.lang.security.args.args -- test helper argument parsing
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (mode, what) = match args.as_slice() {
         [m] => (m.as_str(), ""),
@@ -45,6 +46,7 @@ fn main() {
         #[cfg(unix)]
         ("escape", "kill") => {
             // Try to kill another process (the pid comes on stdin-free argv).
+            // nosemgrep: rust.lang.security.args.args -- test helper argument parsing
             let target = std::env::args()
                 .nth(3)
                 .and_then(|p| p.parse::<i32>().ok())

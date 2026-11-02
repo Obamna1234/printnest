@@ -45,6 +45,7 @@ EXIT CODES:
 fn main() -> ExitCode {
     // If started as the sandboxed decoder, serve one request and exit.
     printnest_sandbox::maybe_run_worker();
+    // nosemgrep: rust.lang.security.args.args -- ordinary command-line parsing; argv[0] is never used
     let args: Vec<String> = std::env::args().skip(1).collect();
     match run(&args) {
         Ok(()) => ExitCode::SUCCESS,

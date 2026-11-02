@@ -332,6 +332,7 @@ mod tests {
     use printnest_model::project::{Crop, Element, Rect};
 
     fn tmp(tag: &str) -> PathBuf {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir -- test-only scratch folder
         let d = std::env::temp_dir().join(format!("printnest-doc-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();

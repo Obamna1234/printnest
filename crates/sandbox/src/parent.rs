@@ -56,9 +56,21 @@ pub struct Worker {
 impl Worker {
     /// A worker that is this running executable.
     ///
+    /// On Linux this is `/proc/self/exe`, which always means the exact
+    /// program file that is running, even if the file at its path has since
+    /// been replaced. Elsewhere it is the path the OS reports; replacing
+    /// that needs write access to the install folder.
+    ///
     /// # Errors
     /// If the OS cannot report the current executable's path.
     pub fn current_exe() -> Result<Self, SandboxError> {
+        if cfg!(target_os = "linux") {
+            let me = PathBuf::from("/proc/self/exe");
+            if me.exists() {
+                return Ok(Self::with_exe(me));
+            }
+        }
+        // nosemgrep: rust.lang.security.current-exe.current-exe -- only used to relaunch ourselves as the locked-down decoder; see above
         let exe = std::env::current_exe().map_err(|e| SandboxError::Spawn(e.to_string()))?;
         Ok(Self::with_exe(exe))
     }
