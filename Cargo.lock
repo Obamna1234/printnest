@@ -2201,8 +2201,10 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "printnest-document",
+ "printnest-export",
  "printnest-layout",
  "printnest-model",
+ "printnest-render",
  "printnest-sandbox",
 ]
 
@@ -2268,6 +2270,7 @@ name = "printnest-render"
 version = "0.1.0"
 dependencies = [
  "epaint_default_fonts",
+ "image",
  "printnest-layout",
  "printnest-model",
  "skrifa",

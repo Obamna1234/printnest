@@ -36,6 +36,7 @@ pub enum Request {
     Save,
     SaveAs,
     AddPhotos,
+    Export,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -90,7 +91,7 @@ pub struct Editor {
     pub folder: Option<ProjectFolder>,
     pub dirty: bool,
     pub library: Library,
-    product: Product,
+    pub product: Product,
     page: usize,
     selected: Option<usize>,
     history: History,
@@ -191,6 +192,23 @@ impl Editor {
     pub fn retarget_photo(&mut self, old: &SafePath, new: &SafePath) {
         edit::retarget_photo(&mut self.project, old, new);
         self.history.retarget_photo(old, new);
+    }
+
+    /// Where the bytes of every photo the design uses live (validated).
+    pub fn photo_sources(&self) -> std::collections::HashMap<String, std::path::PathBuf> {
+        self.project
+            .photo_paths()
+            .into_iter()
+            .filter_map(|k| {
+                let path = self.library.origin(k.as_str())?.path(k).ok()?;
+                Some((k.as_str().to_owned(), path))
+            })
+            .collect()
+    }
+
+    /// True while the user is mid-gesture (don't autosave under them).
+    pub fn busy(&self) -> bool {
+        self.drag.is_some() || self.panel_edit_active
     }
 
     fn id_at(&self, i: usize) -> Option<String> {
@@ -462,6 +480,13 @@ impl Editor {
             ui.separator();
             if ui.button("Add photos…").clicked() {
                 requests.push(Request::AddPhotos);
+            }
+            if ui
+                .button(egui::RichText::new("Export…").strong())
+                .on_hover_text("Make files for a kiosk, print shop or home printer")
+                .clicked()
+            {
+                requests.push(Request::Export);
             }
             if ui.button("Empty frame").clicked() {
                 let (w, h) = self.trim();

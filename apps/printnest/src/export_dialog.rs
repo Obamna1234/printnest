@@ -1,0 +1,336 @@
+//! The Export dialog: pick how you'll print, see what to fix, export.
+//!
+//! The design check (preflight) and the export both run on a background
+//! thread. Photos are read size-capped and decoded only in the sandboxed
+//! worker, exactly as in the editor.
+
+use eframe::egui;
+use printnest_export::{ExportReport, Issue, Paper, Profile, Severity};
+use printnest_model::catalogue::Product;
+use printnest_model::project::Project;
+use printnest_model::safe_path::SafePath;
+use printnest_render::Photo;
+use printnest_sandbox::{Worker, read_capped};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Mutex};
+
+const PROFILES: [(Profile, &str, &str); 4] = [
+    (
+        Profile::Kiosk,
+        "Photo kiosk or online photo lab",
+        "JPEG files at exactly the right size. Copy them to a USB stick, SD card or phone.",
+    ),
+    (
+        Profile::PrintShop,
+        "Print shop",
+        "A PDF with bleed and crop marks, ready for professional printing and trimming.",
+    ),
+    (
+        Profile::Home(Paper::A4),
+        "Home printer, A4",
+        "A PDF to print yourself. Big designs are split over several sheets to tape together.",
+    ),
+    (
+        Profile::Home(Paper::Letter),
+        "Home printer, US Letter",
+        "As above, on US Letter paper.",
+    ),
+];
+
+enum Msg {
+    Issues(Vec<Issue>),
+    Progress(usize, usize),
+    Done(Result<ExportReport, String>),
+}
+
+enum Stage {
+    Choosing,
+    Exporting { done: usize, total: usize },
+    Finished(Result<ExportReport, String>),
+}
+
+/// What the dialog wants the app to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    None,
+    Close,
+    PickFolder,
+}
+
+pub struct ExportDialog {
+    project: Project,
+    product: Product,
+    /// Where each photo's bytes are (validated paths).
+    sources: Arc<HashMap<String, PathBuf>>,
+    profile: Profile,
+    issues: Option<Vec<Issue>>,
+    stage: Stage,
+    rx: Receiver<Msg>,
+    tx: std::sync::mpsc::Sender<Msg>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for ExportDialog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExportDialog")
+            .field("profile", &self.profile)
+            .finish()
+    }
+}
+
+fn load_bytes(sources: &HashMap<String, PathBuf>, src: &str) -> Option<Vec<u8>> {
+    read_capped(sources.get(src)?).ok()
+}
+
+impl ExportDialog {
+    /// Opens the dialog and starts checking the design.
+    pub fn new(project: Project, product: Product, sources: HashMap<String, PathBuf>) -> Self {
+        let (tx, rx) = channel();
+        let sources = Arc::new(sources);
+        {
+            let (project, product, sources, tx) = (
+                project.clone(),
+                product.clone(),
+                Arc::clone(&sources),
+                tx.clone(),
+            );
+            std::thread::spawn(move || {
+                let worker = Worker::current_exe().ok();
+                let mut sizes = HashMap::new();
+                for src in project.photo_paths() {
+                    if let (Some(w), Some(bytes)) =
+                        (worker.as_ref(), load_bytes(&sources, src.as_str()))
+                        && let Ok(info) = w.probe(&bytes)
+                    {
+                        sizes.insert(src.as_str().to_owned(), (info.width, info.height));
+                    }
+                }
+                let _ = tx.send(Msg::Issues(printnest_export::preflight(
+                    &project, &product, &sizes,
+                )));
+            });
+        }
+        ExportDialog {
+            project,
+            product,
+            sources,
+            profile: Profile::Kiosk,
+            issues: None,
+            stage: Stage::Choosing,
+            rx,
+            tx,
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Starts exporting into a new folder inside `parent`.
+    pub fn start(&mut self, parent: PathBuf) {
+        let (project, product, sources, tx, cancel, profile) = (
+            self.project.clone(),
+            self.product.clone(),
+            Arc::clone(&self.sources),
+            self.tx.clone(),
+            Arc::clone(&self.cancel),
+            self.profile,
+        );
+        self.stage = Stage::Exporting {
+            done: 0,
+            total: project.pages.len(),
+        };
+        std::thread::spawn(move || {
+            let worker = Worker::current_exe().ok();
+            // One photo decoded at a time per page; cache the last few.
+            let cache: Mutex<HashMap<(String, u32), Arc<Photo>>> = Mutex::new(HashMap::new());
+            let mut loader = |src: &str, edge: u32| {
+                if let Ok(c) = cache.lock()
+                    && let Some(p) = c.get(&(src.to_owned(), edge))
+                {
+                    return Some(Arc::clone(p));
+                }
+                SafePath::new(src).ok()?;
+                let bytes = load_bytes(&sources, src)?;
+                let p = worker.as_ref()?.preview(&bytes, edge).ok()?;
+                let photo = Arc::new(Photo {
+                    width: p.width,
+                    height: p.height,
+                    rgba: p.rgba,
+                });
+                if let Ok(mut c) = cache.lock() {
+                    if c.len() >= 4 {
+                        c.clear();
+                    }
+                    c.insert((src.to_owned(), edge), Arc::clone(&photo));
+                }
+                Some(photo)
+            };
+            let tx2 = tx.clone();
+            let mut progress = |done: usize, total: usize| {
+                let _ = tx2.send(Msg::Progress(done, total));
+                !cancel.load(Ordering::Relaxed)
+            };
+            let result = printnest_export::export(
+                &project,
+                &product,
+                profile,
+                &parent,
+                &mut loader,
+                &mut progress,
+            )
+            .map_err(|e| e.to_string());
+            let _ = tx.send(Msg::Done(result));
+        });
+    }
+
+    fn poll(&mut self, ctx: &egui::Context) {
+        while let Ok(msg) = self.rx.try_recv() {
+            match msg {
+                Msg::Issues(i) => self.issues = Some(i),
+                Msg::Progress(done, total) => {
+                    self.stage = Stage::Exporting { done, total };
+                }
+                Msg::Done(r) => self.stage = Stage::Finished(r),
+            }
+        }
+        let busy = self.issues.is_none() || matches!(self.stage, Stage::Exporting { .. });
+        if busy {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
+
+    /// Draws the dialog.
+    pub fn show(&mut self, ctx: &egui::Context) -> Action {
+        self.poll(ctx);
+        let mut action = Action::None;
+        egui::Modal::new(egui::Id::unique("export-dialog")).show(ctx, |ui| {
+            ui.set_width(560.0);
+            ui.heading("Export for printing");
+            ui.add_space(4.0);
+            match &self.stage {
+                Stage::Choosing => {
+                    ui.label(egui::RichText::new("How will you print it?").strong());
+                    for (p, name, help) in PROFILES {
+                        ui.radio_value(&mut self.profile, p, name);
+                        ui.label(egui::RichText::new(help).small().weak());
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new("Design check").strong());
+                    match &self.issues {
+                        None => {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label("Checking your photos…");
+                            });
+                        }
+                        Some(issues) if issues.is_empty() => {
+                            ui.label(
+                                egui::RichText::new("Everything looks ready to print.")
+                                    .color(egui::Color32::from_rgb(46, 160, 67)),
+                            );
+                        }
+                        Some(issues) => {
+                            egui::ScrollArea::vertical()
+                                .max_height(180.0)
+                                .show(ui, |ui| {
+                                    for i in issues {
+                                        let (tag, colour) = match i.severity {
+                                            Severity::Problem => {
+                                                ("Problem", egui::Color32::from_rgb(210, 60, 50))
+                                            }
+                                            Severity::Warning => {
+                                                ("Check", egui::Color32::from_rgb(220, 150, 20))
+                                            }
+                                        };
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "{tag} · page {}",
+                                                    i.page
+                                                ))
+                                                .color(colour)
+                                                .strong(),
+                                            );
+                                            ui.label(crate::picker::display_name(&i.message));
+                                        });
+                                    }
+                                });
+                            ui.label(
+                                egui::RichText::new(
+                                    "You can still export; these are only suggestions.",
+                                )
+                                .small()
+                                .weak(),
+                            );
+                        }
+                    }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("Choose folder and export…").clicked() {
+                            action = Action::PickFolder;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            action = Action::Close;
+                        }
+                    });
+                }
+                Stage::Exporting { done, total } => {
+                    let frac = if *total == 0 {
+                        0.0
+                    } else {
+                        *done as f32 / *total as f32
+                    };
+                    ui.label(format!(
+                        "Rendering page {} of {total}…",
+                        (*done + 1).min(*total)
+                    ));
+                    ui.add(egui::ProgressBar::new(frac).show_percentage());
+                    if ui.button("Cancel").clicked() {
+                        self.cancel.store(true, Ordering::Relaxed);
+                    }
+                }
+                Stage::Finished(Ok(report)) => {
+                    ui.label(
+                        egui::RichText::new("Done!")
+                            .strong()
+                            .color(egui::Color32::from_rgb(46, 160, 67)),
+                    );
+                    ui.label(format!(
+                        "Saved at {:.0} ppi in:\n{}",
+                        report.ppi,
+                        crate::picker::display_name(&report.folder.display().to_string())
+                    ));
+                    for f in &report.files {
+                        let name = f
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        ui.label(format!("• {}", crate::picker::display_name(&name)));
+                    }
+                    if ui.button("Close").clicked() {
+                        action = Action::Close;
+                    }
+                }
+                Stage::Finished(Err(e)) => {
+                    ui.label(
+                        egui::RichText::new("The export didn't finish")
+                            .strong()
+                            .color(egui::Color32::from_rgb(210, 60, 50)),
+                    );
+                    ui.label(crate::picker::display_name(e));
+                    if ui.button("Close").clicked() {
+                        action = Action::Close;
+                    }
+                }
+            }
+        });
+        action
+    }
+
+    /// True while pages are being written (closing would abandon it).
+    #[must_use]
+    pub fn busy(&self) -> bool {
+        matches!(self.stage, Stage::Exporting { .. })
+    }
+}

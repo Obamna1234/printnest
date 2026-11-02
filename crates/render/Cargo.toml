@@ -18,5 +18,9 @@ vello_cpu = { version = "=0.2.0", default-features = false, features = ["std", "
 skrifa = { version = "=0.44.0", default-features = false, features = ["std"] }
 epaint_default_fonts = "=0.37.0"
 
+[dev-dependencies]
+# Golden-image comparison in tests only.
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+
 [lints]
 workspace = true

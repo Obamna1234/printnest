@@ -8,6 +8,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod editor;
+mod export_dialog;
 mod library;
 mod picker;
 mod preview;
@@ -58,6 +59,7 @@ enum PickerFor {
     Photos,
     Open,
     SaveAs,
+    Export,
 }
 
 #[derive(Debug)]
@@ -71,6 +73,8 @@ struct App {
     last_dir: Option<std::path::PathBuf>,
     /// The user confirmed closing with unsaved changes.
     closing: bool,
+    export: Option<export_dialog::ExportDialog>,
+    last_autosave: std::time::Instant,
 }
 
 impl App {
@@ -84,6 +88,8 @@ impl App {
             message: None,
             last_dir: None,
             closing: false,
+            export: None,
+            last_autosave: std::time::Instant::now(),
         }
     }
 
@@ -201,6 +207,31 @@ impl App {
     /// `discard`: the user already agreed to lose unsaved changes. The
     /// dirty flag is never cleared here, so cancelling the next dialog
     /// keeps the protection.
+    /// Saves a project that already has a folder once a minute while it
+    /// has unsaved changes and nothing else is going on.
+    fn autosave(&mut self) {
+        const EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+        let idle = self.picker.is_none()
+            && self.confirm.is_none()
+            && self.message.is_none()
+            && self.export.is_none();
+        let Some(ed) = self.editor.as_ref() else {
+            return;
+        };
+        if !ed.dirty || ed.busy() || !idle || self.last_autosave.elapsed() < EVERY {
+            return;
+        }
+        self.last_autosave = std::time::Instant::now();
+        if let Some(folder) = ed.folder.clone() {
+            self.save_into(folder);
+            if let Some(ed) = self.editor.as_mut()
+                && !ed.dirty
+            {
+                ed.status = "Autosaved.".into();
+            }
+        }
+    }
+
     fn handle(&mut self, req: Request, discard: bool) {
         let dirty = !discard && self.editor.as_ref().is_some_and(|e| e.dirty);
         match req {
@@ -229,6 +260,15 @@ impl App {
                     Picker::new(Mode::Save, self.last_dir.clone()),
                 ));
             }
+            Request::Export => {
+                if let Some(ed) = self.editor.as_ref() {
+                    self.export = Some(export_dialog::ExportDialog::new(
+                        ed.project.clone(),
+                        ed.product.clone(),
+                        ed.photo_sources(),
+                    ));
+                }
+            }
             Request::AddPhotos => {
                 self.picker = Some((
                     PickerFor::Photos,
@@ -239,6 +279,20 @@ impl App {
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
+        if self.picker.is_none()
+            && let Some(d) = self.export.as_mut()
+        {
+            match d.show(ctx) {
+                export_dialog::Action::None => {}
+                export_dialog::Action::Close => self.export = None,
+                export_dialog::Action::PickFolder => {
+                    self.picker = Some((
+                        PickerFor::Export,
+                        Picker::new(Mode::Folder, self.last_dir.clone()),
+                    ));
+                }
+            }
+        }
         if let Some((purpose, picker)) = self.picker.as_mut() {
             let purpose = *purpose;
             match picker.show(ctx) {
@@ -262,6 +316,11 @@ impl App {
                             }
                         }
                         PickerFor::SaveAs => {}
+                        PickerFor::Export => {
+                            if let (Some(d), Some(dir)) = (self.export.as_mut(), paths.first()) {
+                                d.start(dir.clone());
+                            }
+                        }
                     }
                 }
                 Outcome::SaveTo { parent, name } => match ProjectFolder::create(&parent, &name) {
@@ -331,9 +390,17 @@ impl eframe::App for App {
         };
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
 
+        // Closing mid-export would leave half the files written.
+        let exporting = self
+            .export
+            .as_ref()
+            .is_some_and(export_dialog::ExportDialog::busy);
+        if exporting && ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
         // Closing the window with unsaved changes asks first.
         let dirty = self.editor.as_ref().is_some_and(|e| e.dirty);
-        if ctx.input(|i| i.viewport().close_requested()) && dirty && !self.closing {
+        if ctx.input(|i| i.viewport().close_requested()) && dirty && !self.closing && !exporting {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.confirm = Some(AfterDiscard::Close);
         }
@@ -379,6 +446,7 @@ impl eframe::App for App {
         for r in requests {
             self.handle(r, false);
         }
+        self.autosave();
         self.dialogs(&ctx);
     }
 }

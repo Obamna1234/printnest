@@ -24,6 +24,8 @@ pub enum Mode {
     Project,
     /// Choose a folder and a name to save a new project into.
     Save,
+    /// Choose a folder (exports go into a new folder inside it).
+    Folder,
 }
 
 #[derive(Debug)]
@@ -155,7 +157,7 @@ impl Picker {
             let keep = match self.mode {
                 Mode::Photos => is_dir || (meta.is_file() && is_photo(&name)),
                 Mode::Project => is_dir || (meta.is_file() && name == "project.json"),
-                Mode::Save => is_dir,
+                Mode::Save | Mode::Folder => is_dir,
             };
             if keep {
                 self.entries.push(Entry {
@@ -208,6 +210,7 @@ impl Picker {
             Mode::Photos => "Add photos",
             Mode::Project => "Open project",
             Mode::Save => "Save project",
+            Mode::Folder => "Choose where to export",
         };
         let modal = egui::Modal::new(egui::Id::unique("printnest-picker")).show(ctx, |ui| {
             ui.set_width(660.0);
@@ -327,6 +330,17 @@ impl Picker {
                             parent: self.dir.clone(),
                             name: self.name.clone(),
                         };
+                    }
+                }
+                Mode::Folder => {
+                    ui.label(
+                        egui::RichText::new(
+                            "A new folder is created here; nothing is overwritten.",
+                        )
+                        .weak(),
+                    );
+                    if ui.button("Export here").clicked() {
+                        outcome = Outcome::Picked(vec![self.dir.clone()]);
                     }
                 }
                 Mode::Photos => {
