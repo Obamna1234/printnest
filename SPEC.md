@@ -121,7 +121,8 @@ supply-chain/           cargo-vet audits
 
 Every export: strip EXIF/GPS by default; write only to a user-picked
 folder; write `PRINT-ME.txt` beside kiosk files; show "How to print this";
-deterministic (same input → identical bytes).
+deterministic (same input → identical bytes on the same OS and CPU type;
+across platforms renders agree within the golden-test tolerance).
 
 ## 7. Security and privacy
 
@@ -297,8 +298,13 @@ a human test print per minor release.
   or tiled with overlap), preflight, `printnest-cli export`. PDFs hold one
   300 ppi image per page; true PDF/X-4 (output intent, vector text) is a
   later step. Export dialog (design check, progress, cancel), autosave
-  every 60 s and a golden render test are done. Still to do: saving on a
-  background thread, crash recovery for never-saved designs.]
+  every 60 s to a separate recovery file (offered back on open; Save is
+  the only thing that writes project.json) and a golden render test are
+  done. Hardening from review: per-page photo memory budget, bounded
+  paint work, cancel inside a page, undecodable photos reported, PDFs
+  streamed to disk, `.partial` files until complete, failed exports
+  removed. Still to do: saving on a background thread, recovery for
+  never-saved designs, rotating backups, PDF/X-4.]
 - **M5 Photo books** — spreads, covers, spine, layouts, auto-layout.
 - **M6 Wall decor** — framed prints + mats, canvas wrap templates.
 - **M7 Calendars and cards.**

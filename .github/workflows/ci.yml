@@ -115,6 +115,31 @@ jobs:
           # A second export must not touch the first.
           $cli export "$tmp/Smoke.printnest" --profile kiosk --out "$tmp/out"
           test -d "$tmp/out/Smoke - kiosk (2)"
+          # With a real photo, decoded through the sandbox: same input must
+          # give byte-identical files, with no camera metadata.
+          mkdir -p "$tmp/Photo.printnest/photos" "$tmp/out2" "$tmp/out3"
+          cp tests/fixtures/rotated-64x48.jpg "$tmp/Photo.printnest/photos/p.jpg"
+          sed 's#"elements": \[\]#"elements": [{"type":"photo","id":"x","rect":{"x":-3,"y":-3,"w":158.4,"h":107.6,"rotation":0},"src":"photos/p.jpg"}]#' \
+            "$tmp/print.json" > "$tmp/Photo.printnest/project.json"
+          $cli validate "$tmp/Photo.printnest/project.json"
+          for d in out2 out3; do
+            $cli export "$tmp/Photo.printnest" --profile kiosk --out "$tmp/$d"
+            $cli export "$tmp/Photo.printnest" --profile shop --out "$tmp/$d"
+          done
+          cmp "$tmp/out2/Untitled - kiosk/Untitled.jpg" "$tmp/out3/Untitled - kiosk/Untitled.jpg"
+          cmp "$tmp/out2/Untitled - print shop/Untitled - print shop.pdf" \
+              "$tmp/out3/Untitled - print shop/Untitled - print shop.pdf"
+          if grep -q "Exif" "$tmp/out2/Untitled - kiosk/Untitled.jpg"; then
+            echo "::error::exported JPEG contains EXIF metadata"; exit 1
+          fi
+          if find "$tmp" -name '*.partial' | grep -q .; then
+            echo "::error::partial files left behind"; exit 1
+          fi
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get install -y --no-install-recommends qpdf >/dev/null
+            qpdf --check "$tmp/out2/Untitled - print shop/Untitled - print shop.pdf"
+            qpdf --check "$tmp/out/Smoke - home A4/Smoke - A4.pdf"
+          fi
 
   msrv-lockfile:
     name: Lockfile is up to date

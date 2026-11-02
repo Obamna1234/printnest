@@ -1,6 +1,7 @@
 use super::*;
 use printnest_model::Catalogue;
 use printnest_model::project::{Crop, Element, Rect};
+use std::collections::HashMap;
 
 fn tmp(tag: &str) -> PathBuf {
     // nosemgrep: rust.lang.security.temp-dir.temp-dir -- test-only scratch folder
@@ -43,6 +44,10 @@ fn loader() -> impl FnMut(&str, u32) -> Option<Arc<Photo>> {
     }
 }
 
+fn sizes() -> HashMap<String, (u32, u32)> {
+    HashMap::from([("photos/a.jpg".to_owned(), (64, 64))])
+}
+
 fn no_progress() -> impl FnMut(usize, usize) -> bool {
     |_, _| true
 }
@@ -67,8 +72,10 @@ fn kiosk_jpeg_is_exact_size_without_metadata() {
         prod,
         Profile::Kiosk,
         &dir,
+        &sizes(),
         &mut loader(),
         &mut no_progress(),
+        &|| false,
     )
     .unwrap();
     assert!(rep.folder.ends_with("Beach day - kiosk"));
@@ -92,8 +99,10 @@ fn kiosk_jpeg_is_exact_size_without_metadata() {
         prod,
         Profile::Kiosk,
         &dir,
+        &sizes(),
         &mut loader(),
         &mut no_progress(),
+        &|| false,
     )
     .unwrap();
     assert!(again.folder.ends_with("Beach day - kiosk (2)"));
@@ -114,8 +123,10 @@ fn print_shop_pdf_has_bleed_and_marks() {
         prod,
         Profile::PrintShop,
         &dir,
+        &sizes(),
         &mut loader(),
         &mut no_progress(),
+        &|| false,
     )
     .unwrap();
     let pdf = fs::read(rep.folder.join("Beach day - print shop.pdf")).unwrap();
@@ -139,8 +150,10 @@ fn home_pdf_fits_or_tiles() {
         prod,
         Profile::Home(Paper::A4),
         &dir,
+        &sizes(),
         &mut loader(),
         &mut no_progress(),
+        &|| false,
     )
     .unwrap();
     let s = String::from_utf8_lossy(&fs::read(rep.files.first().unwrap()).unwrap()).into_owned();
@@ -199,8 +212,10 @@ fn cancelling_stops_the_export() {
         prod,
         Profile::Kiosk,
         &dir,
+        &sizes(),
         &mut loader(),
         &mut |_, _| false,
+        &|| false,
     );
     assert!(matches!(r, Err(ExportError::Cancelled)));
     let _ = fs::remove_dir_all(&dir);
@@ -215,4 +230,64 @@ fn kiosk_resolution_is_capped_for_big_posters() {
         assert!(w <= KIOSK_MAX_EDGE && h <= KIOSK_MAX_EDGE, "{}", prod.id);
         assert!(ppi <= TARGET_PPI);
     }
+}
+
+#[test]
+fn undecodable_photos_are_reported_and_cancel_cleans_up() {
+    let cat = Catalogue::builtin().unwrap();
+    let prod = cat.product("print-6x4").unwrap();
+    let p = project(&cat, "print-6x4");
+    let dir = tmp("missing");
+    let rep = export(
+        &p,
+        prod,
+        Profile::Kiosk,
+        &dir,
+        &sizes(),
+        &mut |_: &str, _: u32| None,
+        &mut no_progress(),
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(rep.missing, vec!["photos/a.jpg".to_owned()]);
+    // No size known at all: also missing, never silently blank.
+    let rep = export(
+        &p,
+        prod,
+        Profile::Kiosk,
+        &dir,
+        &HashMap::new(),
+        &mut loader(),
+        &mut no_progress(),
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(rep.missing.len(), 1);
+    // No .partial files are left behind.
+    for entry in fs::read_dir(&rep.folder).unwrap() {
+        let name = entry.unwrap().file_name();
+        assert!(!name.to_string_lossy().ends_with(".partial"));
+    }
+    // A cancelled export removes its own folder.
+    let before = fs::read_dir(&dir).unwrap().count();
+    let r = export(
+        &p,
+        prod,
+        Profile::PrintShop,
+        &dir,
+        &sizes(),
+        &mut loader(),
+        &mut no_progress(),
+        &|| true,
+    );
+    assert!(matches!(r, Err(ExportError::Cancelled)));
+    assert_eq!(fs::read_dir(&dir).unwrap().count(), before);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn long_titles_fit_file_name_limits() {
+    let name = safe_base_name(&"\u{20000}".repeat(60));
+    assert!(name.len() <= 100, "{}", name.len());
+    assert!(format!("{name} - print shop.pdf.partial").len() < 255);
 }

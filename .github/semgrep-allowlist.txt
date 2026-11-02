@@ -1,0 +1,8 @@
+apps/printnest-cli/src/main.rs rust.lang.security.args.args
+apps/printnest/src/picker.rs rust.lang.security.temp-dir.temp-dir
+crates/document/src/lib.rs rust.lang.security.temp-dir.temp-dir
+crates/export/src/tests.rs rust.lang.security.temp-dir.temp-dir
+crates/sandbox/src/bin/selftest.rs rust.lang.security.args.args
+crates/sandbox/src/bin/selftest.rs rust.lang.security.args.args
+crates/sandbox/src/lib.rs rust.lang.security.args-os.args-os
+crates/sandbox/src/parent.rs rust.lang.security.current-exe.current-exe

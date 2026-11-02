@@ -20,8 +20,10 @@ use image::codecs::jpeg::{JpegEncoder, PixelDensity};
 use printnest_model::catalogue::Product;
 use printnest_model::project::Project;
 use printnest_model::safe_path::SafePath;
-use printnest_render::{Area, Photo, Raster, RenderError, needed_edge, page_pixels, render_page};
-use std::collections::{HashMap, HashSet};
+use printnest_render::{
+    Area, Photo, Raster, RenderError, fit_budget, needed_edge, page_pixels, render_page,
+};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -106,6 +108,8 @@ pub struct ExportReport {
     pub files: Vec<PathBuf>,
     /// Resolution the pages were rendered at.
     pub ppi: f64,
+    /// Photos that couldn't be decoded and are missing from the print.
+    pub missing: Vec<String>,
 }
 
 /// Supplies decoded photos (through the sandbox) at no more than the given
@@ -127,9 +131,21 @@ pub fn safe_base_name(name: &str) -> String {
                 '_'
             }
         })
-        .take(60)
         .collect();
-    let trimmed = cleaned.trim().trim_matches('_').trim();
+    // At most 100 bytes (file names are limited in bytes, not characters).
+    let mut end = 0;
+    for (i, c) in cleaned.char_indices() {
+        if i + c.len_utf8() > 100 {
+            break;
+        }
+        end = i + c.len_utf8();
+    }
+    let trimmed = cleaned
+        .get(..end)
+        .unwrap_or("")
+        .trim()
+        .trim_matches('_')
+        .trim();
     // Checked as a file name too: `CON.jpg` is reserved on Windows.
     let usable = SafePath::new(&format!("{trimmed} - kiosk")).is_ok()
         && SafePath::new(&format!("{trimmed}.jpg")).is_ok();
@@ -160,14 +176,51 @@ fn new_folder(parent: &Path, base: &str, suffix: &str) -> Result<PathBuf, Export
     ))
 }
 
-/// Writes a new file (never replacing one).
+/// Writes `bytes` to a new file at `path`, never replacing one: the data
+/// goes to `<path>.partial` first and is moved into place only when
+/// complete, so an interrupted export never looks finished.
 fn write_new(path: &Path, bytes: &[u8]) -> Result<(), ExportError> {
+    write_new_with(path, |f| f.write_all(bytes))
+}
+
+fn partial_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(std::ffi::OsStr::to_os_string)
+        .unwrap_or_default();
+    name.push(".partial");
+    path.with_file_name(name)
+}
+
+fn write_new_with(
+    path: &Path,
+    fill: impl FnOnce(&mut fs::File) -> std::io::Result<()>,
+) -> Result<(), ExportError> {
+    let tmp = partial_path(path);
     let mut f = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(path)
+        .open(&tmp)
         .map_err(io)?;
-    f.write_all(bytes).and_then(|()| f.sync_all()).map_err(io)
+    let written = fill(&mut f).and_then(|()| f.sync_all());
+    drop(f);
+    if let Err(e) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(io(e));
+    }
+    // A hard link fails if `path` exists, so nothing is ever replaced.
+    // File systems without hard links (FAT USB sticks) fall back to a
+    // checked rename inside our own freshly created folder.
+    let placed = match fs::hard_link(&tmp, path) {
+        Ok(()) => fs::remove_file(&tmp),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
+        Err(_) if fs::symlink_metadata(path).is_err() => fs::rename(&tmp, path),
+        Err(e) => Err(e),
+    };
+    placed.map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        io(e)
+    })
 }
 
 /// Encodes a rendered page as a baseline JPEG with its print resolution.
@@ -197,21 +250,26 @@ pub fn choose_ppi(product: &Product, area: Area, max_edge: u32) -> f64 {
     ppi.max(30.0)
 }
 
-/// Renders page `i`, decoding only the photos it shows.
+/// Renders page `i`, decoding only the photos it shows, at sizes that fit
+/// the per-page memory budget. Photos that fail to load go in `missing`.
+#[allow(clippy::too_many_arguments)]
 fn render(
     project: &Project,
     product: &Product,
     i: usize,
     ppi: f64,
     area: Area,
+    sizes: &HashMap<String, (u32, u32)>,
     loader: &mut PhotoLoader<'_>,
+    cancelled: &dyn Fn() -> bool,
+    missing: &mut Vec<String>,
 ) -> Result<Raster, ExportError> {
-    let mut photos = HashMap::new();
-    let srcs: HashSet<String> = project
+    let srcs: Vec<String> = project
         .pages
         .get(i)
         .map(|p| {
-            p.elements
+            let set: std::collections::BTreeSet<String> = p
+                .elements
                 .iter()
                 .filter_map(|e| match e {
                     printnest_model::project::Element::Photo { src: Some(s), .. } => {
@@ -220,47 +278,137 @@ fn render(
                     printnest_model::project::Element::Photo { .. }
                     | printnest_model::project::Element::Text { .. } => None,
                 })
-                .collect()
+                .collect();
+            set.into_iter().collect()
         })
         .unwrap_or_default();
-    for src in srcs {
-        let edge = needed_edge(project, i, &src, ppi, MAX_PHOTO_EDGE);
-        if let Some(p) = loader(&src, edge) {
-            photos.insert(src, p);
+    let mut wanted = Vec::new();
+    for src in &srcs {
+        match sizes.get(src) {
+            Some(&(w, h)) if w > 0 && h > 0 => {
+                let edge = needed_edge(project, i, src, (w, h), ppi, MAX_PHOTO_EDGE);
+                let aspect = f64::from(w.min(h)) / f64::from(w.max(h));
+                wanted.push((src.clone(), edge, aspect));
+            }
+            // Unknown size: it couldn't be opened when checked.
+            _ => {
+                if !missing.contains(src) {
+                    missing.push(src.clone());
+                }
+            }
         }
     }
-    Ok(render_page(project, product, i, &photos, ppi, area)?)
+    let edges = fit_budget(&wanted.iter().map(|(_, e, a)| (*e, *a)).collect::<Vec<_>>());
+    let mut photos = HashMap::new();
+    for ((src, _, _), edge) in wanted.into_iter().zip(edges) {
+        if cancelled() {
+            return Err(ExportError::Cancelled);
+        }
+        match loader(&src, edge) {
+            Some(p) => {
+                photos.insert(src, p);
+            }
+            None => {
+                if !missing.contains(&src) {
+                    missing.push(src);
+                }
+            }
+        }
+    }
+    match render_page(project, product, i, photos, ppi, area, cancelled) {
+        Ok(r) => Ok(r),
+        Err(RenderError::Cancelled) => Err(ExportError::Cancelled),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Exports `project` for `profile` into a new folder inside `parent`.
+/// `sizes` holds each photo's full-resolution size (from the sandbox's
+/// probe); photos without one are treated as missing. On any failure or
+/// cancellation the new folder is removed again.
 ///
 /// # Errors
-/// On render, encode or write failure, or if `progress` cancels. Files
-/// already written stay in the new folder.
+/// On render, encode or write failure, or if `progress` cancels.
+#[allow(clippy::too_many_arguments)]
 pub fn export(
     project: &Project,
     product: &Product,
     profile: Profile,
     parent: &Path,
+    sizes: &HashMap<String, (u32, u32)>,
     loader: &mut PhotoLoader<'_>,
     progress: &mut Progress<'_>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<ExportReport, ExportError> {
     let base = safe_base_name(&project.title);
     let folder = new_folder(parent, &base, profile.folder_suffix())?;
+    let result = export_into(
+        project, product, profile, &folder, &base, sizes, loader, progress, cancelled,
+    );
+    if result.is_err() {
+        // Only ever our own, freshly created folder.
+        let _ = fs::remove_dir_all(&folder);
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn export_into(
+    project: &Project,
+    product: &Product,
+    profile: Profile,
+    folder: &Path,
+    base: &str,
+    sizes: &HashMap<String, (u32, u32)>,
+    loader: &mut PhotoLoader<'_>,
+    progress: &mut Progress<'_>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<ExportReport, ExportError> {
     let pages = project.pages.len();
     let mut files = Vec::new();
-    let area = match profile {
-        Profile::PrintShop => Area::Artwork,
-        Profile::Kiosk | Profile::Home(_) => Area::Trim,
+    let mut missing = Vec::new();
+    let (area, max_edge) = match profile {
+        Profile::PrintShop => (Area::Artwork, printnest_render::MAX_RENDER_EDGE),
+        Profile::Kiosk => (Area::Trim, KIOSK_MAX_EDGE),
+        Profile::Home(_) => (Area::Trim, printnest_render::MAX_RENDER_EDGE),
     };
-    let ppi = choose_ppi(product, area, KIOSK_MAX_EDGE);
+    let ppi = choose_ppi(product, area, max_edge);
     let width = pages.to_string().len().max(2);
-    let mut images = Vec::new();
+    let pdf_name = match profile {
+        Profile::Kiosk => None,
+        Profile::PrintShop => Some(format!("{base} - print shop.pdf")),
+        Profile::Home(paper) => Some(format!("{base} - {}.pdf", paper.name())),
+    };
+    // PDFs stream to a .partial file page by page.
+    let mut pdf = match &pdf_name {
+        Some(name) => {
+            let tmp = partial_path(&folder.join(name));
+            let f = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+                .map_err(io)?;
+            Some(pdf::Writer::new(std::io::BufWriter::new(f)).map_err(io)?)
+        }
+        None => None,
+    };
     for i in 0..pages {
-        let raster = render(project, product, i, ppi, area, loader)?;
+        let raster = render(
+            project,
+            product,
+            i,
+            ppi,
+            area,
+            sizes,
+            loader,
+            cancelled,
+            &mut missing,
+        )?;
         let jpeg = encode_jpeg(&raster, ppi)?;
-        match profile {
-            Profile::Kiosk => {
+        let (w, h) = (raster.width, raster.height);
+        drop(raster);
+        match pdf.as_mut() {
+            None => {
                 let name = if pages == 1 {
                     format!("{base}.jpg")
                 } else {
@@ -270,39 +418,57 @@ pub fn export(
                 write_new(&path, &jpeg)?;
                 files.push(path);
             }
-            Profile::PrintShop | Profile::Home(_) => images.push(pdf::Jpeg {
-                width: raster.width,
-                height: raster.height,
-                data: jpeg,
-            }),
+            Some(w_pdf) => {
+                w_pdf
+                    .add_image(&pdf::Jpeg {
+                        width: w,
+                        height: h,
+                        data: jpeg,
+                    })
+                    .map_err(io)?;
+            }
         }
-        if !progress(i + 1, pages) {
+        if !progress(i + 1, pages) || cancelled() {
             return Err(ExportError::Cancelled);
         }
     }
-    match profile {
-        Profile::Kiosk => {
-            let path = folder.join("PRINT-ME.txt");
-            write_new(&path, kiosk_note(project, product, pages).as_bytes())?;
-            files.push(path);
-        }
-        Profile::PrintShop => {
-            let path = folder.join(format!("{base} - print shop.pdf"));
-            let pdf_pages = shop_pages(product, images.len());
-            write_new(&path, &pdf::write(&project.title, &pdf_pages, &images))?;
-            files.push(path);
-            let note = folder.join("PRINT-ME.txt");
-            write_new(&note, shop_note(product).as_bytes())?;
-            files.push(note);
-        }
-        Profile::Home(paper) => {
-            let path = folder.join(format!("{base} - {}.pdf", paper.name()));
-            let pdf_pages = home_pages(product, paper, images.len());
-            write_new(&path, &pdf::write(&project.title, &pdf_pages, &images))?;
-            files.push(path);
-        }
+    if let (Some(w_pdf), Some(name)) = (pdf, pdf_name) {
+        let pdf_pages = match profile {
+            Profile::Home(paper) => home_pages(product, paper, pages),
+            Profile::PrintShop | Profile::Kiosk => shop_pages(product, pages),
+        };
+        let buf = w_pdf.finish(&project.title, &pdf_pages).map_err(io)?;
+        let f = buf.into_inner().map_err(|e| io(e.error()))?;
+        f.sync_all().map_err(io)?;
+        drop(f);
+        let path = folder.join(name);
+        let tmp = partial_path(&path);
+        let placed = match fs::hard_link(&tmp, &path) {
+            Ok(()) => fs::remove_file(&tmp),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
+            Err(_) if fs::symlink_metadata(&path).is_err() => fs::rename(&tmp, &path),
+            Err(e) => Err(e),
+        };
+        placed.map_err(io)?;
+        files.push(path);
     }
-    Ok(ExportReport { folder, files, ppi })
+    let note = match profile {
+        Profile::Kiosk => Some(kiosk_note(project, product, pages)),
+        Profile::PrintShop => Some(shop_note(product)),
+        Profile::Home(_) => None,
+    };
+    if let Some(text) = note {
+        let path = folder.join("PRINT-ME.txt");
+        write_new(&path, text.as_bytes())?;
+        files.push(path);
+    }
+    missing.sort();
+    Ok(ExportReport {
+        folder: folder.to_path_buf(),
+        files,
+        ppi,
+        missing,
+    })
 }
 
 fn size_text(product: &Product) -> String {

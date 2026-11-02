@@ -64,13 +64,13 @@ fn background_and_missing_photo() {
         h: 50.0,
         rotation: 0.0,
     }));
-    let r = render_page(&p, prod, 0, &HashMap::new(), 50.0, Area::Trim).unwrap();
+    let r = render_page(&p, prod, 0, HashMap::new(), 50.0, Area::Trim, &|| false).unwrap();
     assert_eq!(r.pixel(5, 5), Some([0x33, 0x66, 0x99]));
     assert_eq!(
         r.rgb.len() as u64,
         u64::from(r.width) * u64::from(r.height) * 3
     );
-    assert!(render_page(&p, prod, 9, &HashMap::new(), 50.0, Area::Trim).is_err());
+    assert!(render_page(&p, prod, 9, HashMap::new(), 50.0, Area::Trim, &|| false).is_err());
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn photo_fills_its_frame_the_right_way_up() {
     }));
     let photos = HashMap::from([("photos/q.png".to_owned(), quad_photo())]);
     let ppi = 50.8; // 2 px per mm
-    let r = render_page(&p, prod, 0, &photos, ppi, Area::Trim).unwrap();
+    let r = render_page(&p, prod, 0, photos.clone(), ppi, Area::Trim, &|| false).unwrap();
     let at = |x: u32, y: u32| r.pixel(x * 2, y * 2).unwrap();
     assert!(near(at(30, 30), [255, 0, 0]), "top-left red");
     assert!(near(at(90, 30), [0, 255, 0]), "top-right green");
@@ -113,7 +113,7 @@ fn rotation_matches_the_editor() {
     };
     p.pages[0].elements.push(photo_el(rect));
     let photos = HashMap::from([("photos/q.png".to_owned(), quad_photo())]);
-    let r = render_page(&p, prod, 0, &photos, 50.8, Area::Trim).unwrap();
+    let r = render_page(&p, prod, 0, photos.clone(), 50.8, Area::Trim, &|| false).unwrap();
     // The editor's TL corner after a 90° clockwise turn is at top-right.
     let tl = printnest_layout::geometry::corners(&rect)[0];
     let (x, y) = (tl.x - 15.0, tl.y + 15.0); // just inside that corner
@@ -147,7 +147,7 @@ fn crop_zoom_shows_the_centre() {
         },
     });
     let photos = HashMap::from([("photos/q.png".to_owned(), quad_photo())]);
-    let r = render_page(&p, prod, 0, &photos, 50.8, Area::Trim).unwrap();
+    let r = render_page(&p, prod, 0, photos.clone(), 50.8, Area::Trim, &|| false).unwrap();
     assert!(near(r.pixel(40, 40).unwrap(), [255, 0, 0]));
     assert!(
         near(r.pixel(160, 160).unwrap(), [255, 0, 0]),
@@ -175,7 +175,7 @@ fn text_is_drawn_in_its_box() {
         colour: "#000000".into(),
         align: Align::Left,
     });
-    let r = render_page(&p, prod, 0, &HashMap::new(), 50.0, Area::Trim).unwrap();
+    let r = render_page(&p, prod, 0, HashMap::new(), 50.0, Area::Trim, &|| false).unwrap();
     let px_per_mm = 50.0 / 25.4;
     let dark = |x0: f64, y0: f64, x1: f64, y1: f64| {
         let mut n = 0;
@@ -205,8 +205,8 @@ fn rendering_is_deterministic() {
         rotation: 12.5,
     }));
     let photos = HashMap::from([("photos/q.png".to_owned(), quad_photo())]);
-    let a = render_page(&p, prod, 0, &photos, 100.0, Area::Artwork).unwrap();
-    let b = render_page(&p, prod, 0, &photos, 100.0, Area::Artwork).unwrap();
+    let a = render_page(&p, prod, 0, photos.clone(), 100.0, Area::Artwork, &|| false).unwrap();
+    let b = render_page(&p, prod, 0, photos.clone(), 100.0, Area::Artwork, &|| false).unwrap();
     assert_eq!(a, b);
 }
 
@@ -228,6 +228,54 @@ fn bad_photo_buffers_are_skipped() {
         rgba: vec![0; 7],
     });
     let photos = HashMap::from([("photos/q.png".to_owned(), wrong)]);
-    let r = render_page(&p, prod, 0, &photos, 50.0, Area::Trim).unwrap();
+    let r = render_page(&p, prod, 0, photos.clone(), 50.0, Area::Trim, &|| false).unwrap();
     assert_eq!(r.pixel(10, 10), Some([255, 255, 255]));
+}
+
+#[test]
+fn stacked_photo_bombs_are_refused_and_cancel_works() {
+    let c = cat();
+    let prod = c.product("print-6x4").unwrap();
+    let mut p = Project::new_blank(&c, "print-6x4", "t").unwrap();
+    for _ in 0..40 {
+        p.pages[0].elements.push(photo_el(Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 152.0,
+            h: 102.0,
+            rotation: 0.0,
+        }));
+    }
+    let photos = HashMap::from([("photos/q.png".to_owned(), quad_photo())]);
+    assert_eq!(
+        render_page(&p, prod, 0, photos.clone(), 50.0, Area::Trim, &|| false),
+        Err(RenderError::TooComplex)
+    );
+    p.pages[0].elements.truncate(2);
+    assert_eq!(
+        render_page(&p, prod, 0, photos, 50.0, Area::Trim, &|| true),
+        Err(RenderError::Cancelled)
+    );
+}
+
+#[test]
+fn photo_requests_follow_the_photo_shape_and_fit_the_budget() {
+    let c = cat();
+    let mut p = Project::new_blank(&c, "poster-a4", "t").unwrap();
+    // Wide frame, portrait photo: the photo is shown much taller than the
+    // frame, so more pixels are needed than the frame alone suggests.
+    p.pages[0].elements.push(photo_el(Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 200.0,
+        h: 100.0,
+        rotation: 0.0,
+    }));
+    let e = needed_edge(&p, 0, "photos/q.png", (3000, 4000), 300.0, 100_000);
+    // 200 mm wide -> photo shown 200 x 266.7 mm -> long side 3150 px.
+    assert!((3140..=3160).contains(&e), "{e}");
+    let fitted = fit_budget(&[(20_000, 1.0); 10]);
+    let total: u64 = fitted.iter().map(|&e| u64::from(e) * u64::from(e)).sum();
+    assert!(total <= MAX_PAGE_PHOTO_PIXELS);
+    assert_eq!(fit_budget(&[(1000, 1.0)]), vec![1000]);
 }

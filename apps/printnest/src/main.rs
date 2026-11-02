@@ -74,6 +74,8 @@ struct App {
     /// The user confirmed closing with unsaved changes.
     closing: bool,
     export: Option<export_dialog::ExportDialog>,
+    /// Autosaved changes offered for restoring after opening a project.
+    restore: Option<Project>,
     last_autosave: std::time::Instant,
 }
 
@@ -89,6 +91,7 @@ impl App {
             last_dir: None,
             closing: false,
             export: None,
+            restore: None,
             last_autosave: std::time::Instant::now(),
         }
     }
@@ -116,6 +119,10 @@ impl App {
                     return;
                 };
                 self.last_dir = folder.root().parent().map(std::path::Path::to_path_buf);
+                // Autosaved changes newer than the last save (e.g. after a crash).
+                self.restore = folder
+                    .recovery(&self.catalogue)
+                    .filter(|r| *r != project && r.product == project.product);
                 self.editor = Some(Editor::new(project, prod, Some(folder)));
             }
             Err(e) => self.message = Some(format!("Couldn't open that project: {e}")),
@@ -204,11 +211,9 @@ impl App {
         }
     }
 
-    /// `discard`: the user already agreed to lose unsaved changes. The
-    /// dirty flag is never cleared here, so cancelling the next dialog
-    /// keeps the protection.
-    /// Saves a project that already has a folder once a minute while it
-    /// has unsaved changes and nothing else is going on.
+    /// Once a minute, while a saved project has unsaved changes and nothing
+    /// else is going on, writes them to the project's recovery file. The
+    /// user's own `project.json` is only ever written by Save.
     fn autosave(&mut self) {
         const EVERY: std::time::Duration = std::time::Duration::from_secs(60);
         let idle = self.picker.is_none()
@@ -223,15 +228,28 @@ impl App {
         }
         self.last_autosave = std::time::Instant::now();
         if let Some(folder) = ed.folder.clone() {
-            self.save_into(folder);
-            if let Some(ed) = self.editor.as_mut()
-                && !ed.dirty
-            {
-                ed.status = "Autosaved.".into();
+            let result = folder.save_recovery(&ed.project, &self.catalogue);
+            if let Some(ed) = self.editor.as_mut() {
+                // Never a pop-up from autosave: just the status line.
+                ed.status = match result {
+                    Ok(()) => "Changes autosaved for recovery (not yet saved).".into(),
+                    Err(e) => format!("Autosave failed: {e}"),
+                };
             }
         }
     }
 
+    /// The user agreed to throw away unsaved changes: forget the recovery
+    /// copy too.
+    fn forget_recovery(&self) {
+        if let Some(f) = self.editor.as_ref().and_then(|e| e.folder.as_ref()) {
+            f.discard_recovery();
+        }
+    }
+
+    /// `discard`: the user already agreed to lose unsaved changes. The
+    /// dirty flag is never cleared here, so cancelling the next dialog
+    /// keeps the protection.
     fn handle(&mut self, req: Request, discard: bool) {
         let dirty = !discard && self.editor.as_ref().is_some_and(|e| e.dirty);
         match req {
@@ -349,6 +367,7 @@ impl App {
                 ui.horizontal(|ui| {
                     if ui.button("Discard").clicked() {
                         self.confirm = None;
+                        self.forget_recovery();
                         match after {
                             AfterDiscard::New => self.handle(Request::New, true),
                             AfterDiscard::Open => self.handle(Request::Open, true),
@@ -360,6 +379,29 @@ impl App {
                     }
                     if ui.button("Keep editing").clicked() {
                         self.confirm = None;
+                    }
+                });
+            });
+        }
+
+        if self.restore.is_some() {
+            egui::Modal::new(egui::Id::unique("restore")).show(ctx, |ui| {
+                ui.heading("Unsaved changes found");
+                ui.label(
+                    "This project has changes that were autosaved but never saved \
+                     (perhaps the app closed unexpectedly). Restore them?",
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Restore").clicked()
+                        && let (Some(p), Some(ed)) = (self.restore.take(), self.editor.as_mut())
+                    {
+                        ed.project = p;
+                        ed.dirty = true;
+                        ed.status = "Restored autosaved changes. Save to keep them.".into();
+                    }
+                    if ui.button("No, use the saved version").clicked() {
+                        self.restore = None;
+                        self.forget_recovery();
                     }
                 });
             });
@@ -395,12 +437,16 @@ impl eframe::App for App {
             .export
             .as_ref()
             .is_some_and(export_dialog::ExportDialog::busy);
-        if exporting && ctx.input(|i| i.viewport().close_requested()) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        if exporting
+            && ctx.input(|i| i.viewport().close_requested())
+            && let Some(d) = &self.export
+        {
+            // Closing stops the export; its folder is cleaned up.
+            d.cancel();
         }
         // Closing the window with unsaved changes asks first.
         let dirty = self.editor.as_ref().is_some_and(|e| e.dirty);
-        if ctx.input(|i| i.viewport().close_requested()) && dirty && !self.closing && !exporting {
+        if ctx.input(|i| i.viewport().close_requested()) && dirty && !self.closing {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.confirm = Some(AfterDiscard::Close);
         }
@@ -431,7 +477,12 @@ impl eframe::App for App {
 
         let mut requests = Vec::new();
         if let Some(ed) = self.editor.as_mut() {
-            requests = ed.ui(ui, &self.catalogue);
+            let modal = self.picker.is_some()
+                || self.confirm.is_some()
+                || self.message.is_some()
+                || self.export.is_some()
+                || self.restore.is_some();
+            requests = ed.ui(ui, &self.catalogue, modal);
         } else if let Some(action) = self.start.ui(ui) {
             match action {
                 StartAction::Create {

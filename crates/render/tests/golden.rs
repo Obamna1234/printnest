@@ -85,7 +85,10 @@ fn matches_the_golden_image() {
     let cat = Catalogue::builtin().unwrap();
     let prod = cat.product("print-6x4").unwrap();
     let photos = HashMap::from([("photos/grad.png".to_owned(), gradient())]);
-    let r = render_page(&design(&cat), prod, 0, &photos, 50.0, Area::Artwork).unwrap();
+    let r = render_page(&design(&cat), prod, 0, photos, 50.0, Area::Artwork, &|| {
+        false
+    })
+    .unwrap();
     let path = golden_path();
     if std::env::var_os("PRINTNEST_UPDATE_GOLDEN").is_some() {
         image::save_buffer(

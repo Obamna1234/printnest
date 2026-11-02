@@ -397,9 +397,17 @@ fn cmd_export(catalogue: &Catalogue, args: &[String]) -> Result<(), Failure> {
         eprintln!("rendered page {done} of {total}");
         true
     };
-    let report =
-        printnest_export::export(&project, product, profile, out, &mut loader, &mut progress)
-            .map_err(bad)?;
+    let report = printnest_export::export(
+        &project,
+        product,
+        profile,
+        out,
+        &sizes,
+        &mut loader,
+        &mut progress,
+        &|| false,
+    )
+    .map_err(bad)?;
     println!(
         "exported to {} at {:.0} ppi:",
         report.folder.display(),
@@ -413,7 +421,10 @@ fn cmd_export(catalogue: &Catalogue, args: &[String]) -> Result<(), Failure> {
                 .unwrap_or_default()
         );
     }
-    if issues.iter().any(|i| i.severity == Severity::Problem) {
+    for m in &report.missing {
+        eprintln!("PROBLEM: {m} couldn't be decoded and is missing from the export");
+    }
+    if !report.missing.is_empty() || issues.iter().any(|i| i.severity == Severity::Problem) {
         return Err(bad("exported, but some photos are missing (see above)"));
     }
     Ok(())

@@ -5,6 +5,7 @@
 //! no random IDs.
 
 use std::fmt::Write as _;
+use std::io::Write;
 
 /// Millimetres to PDF points.
 #[must_use]
@@ -111,178 +112,224 @@ fn label_text(s: &str) -> String {
     text_string(&ascii)
 }
 
-/// Builds the whole file.
-#[must_use]
-pub fn write(title: &str, pages: &[Page], images: &[Jpeg]) -> Vec<u8> {
-    let mut out: Vec<u8> = Vec::new();
-    let mut offsets: Vec<usize> = Vec::new();
-    out.extend_from_slice(b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+/// Writes a PDF straight to `W` (a file), image by image, so a long book
+/// never has to be held in memory.
+#[derive(Debug)]
+pub struct Writer<W: Write> {
+    w: W,
+    pos: usize,
+    /// (object number, byte offset).
+    offsets: Vec<(usize, usize)>,
+    images: usize,
+}
 
-    // Object numbers: 1 catalog, 2 pages, 3 info, 4 font, then images,
-    // then per page (page, content).
-    let first_image = 5;
-    let first_page = first_image + images.len();
-    let page_obj = |i: usize| first_page + i * 2;
+/// Images are objects 5.. ; 1 catalog, 2 page tree, 3 info, 4 font.
+const FIRST_IMAGE: usize = 5;
 
-    let obj = |out: &mut Vec<u8>, offsets: &mut Vec<usize>, body: &[u8]| {
-        offsets.push(out.len());
-        let n = offsets.len();
-        out.extend_from_slice(format!("{n} 0 obj\n").as_bytes());
-        out.extend_from_slice(body);
-        out.extend_from_slice(b"\nendobj\n");
-    };
+impl<W: Write> Writer<W> {
+    /// Starts the file.
+    ///
+    /// # Errors
+    /// On write failure.
+    pub fn new(mut w: W) -> std::io::Result<Self> {
+        let header = b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n";
+        w.write_all(header)?;
+        Ok(Writer {
+            w,
+            pos: header.len(),
+            offsets: Vec::new(),
+            images: 0,
+        })
+    }
 
-    obj(&mut out, &mut offsets, b"<< /Type /Catalog /Pages 2 0 R >>");
-    let kids: Vec<String> = (0..pages.len())
-        .map(|i| format!("{} 0 R", page_obj(i)))
-        .collect();
-    obj(
-        &mut out,
-        &mut offsets,
-        format!(
-            "<< /Type /Pages /Kids [{}] /Count {} >>",
-            kids.join(" "),
-            pages.len()
-        )
-        .as_bytes(),
-    );
-    obj(
-        &mut out,
-        &mut offsets,
-        format!(
-            "<< /Title {} /Creator (PrintNest) /Producer (PrintNest) >>",
-            text_string(title)
-        )
-        .as_bytes(),
-    );
-    obj(
-        &mut out,
-        &mut offsets,
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
-    );
-    for img in images {
-        let mut body = format!(
+    fn put(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.w.write_all(bytes)?;
+        self.pos = self.pos.saturating_add(bytes.len());
+        Ok(())
+    }
+
+    fn obj(&mut self, n: usize, parts: &[&[u8]]) -> std::io::Result<()> {
+        self.offsets.push((n, self.pos));
+        self.put(format!("{n} 0 obj\n").as_bytes())?;
+        for p in parts {
+            self.put(p)?;
+        }
+        self.put(b"\nendobj\n")
+    }
+
+    /// Adds an image; returns its index for [`Op::Image`].
+    ///
+    /// # Errors
+    /// On write failure.
+    pub fn add_image(&mut self, img: &Jpeg) -> std::io::Result<usize> {
+        let index = self.images;
+        let head = format!(
             "<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB \
              /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n",
             img.width,
             img.height,
             img.data.len()
-        )
-        .into_bytes();
-        body.extend_from_slice(&img.data);
-        body.extend_from_slice(b"\nendstream");
-        obj(&mut out, &mut offsets, &body);
+        );
+        self.obj(
+            FIRST_IMAGE + index,
+            &[head.as_bytes(), &img.data, b"\nendstream"],
+        )?;
+        self.images += 1;
+        Ok(index)
     }
-    for (i, page) in pages.iter().enumerate() {
-        let mut content = String::new();
-        let mut used: Vec<usize> = Vec::new();
-        for op in &page.ops {
-            match op {
-                Op::Image {
-                    index,
-                    x,
-                    y,
-                    w,
-                    h,
-                    clip,
-                } => {
-                    if *index >= images.len() {
-                        continue;
-                    }
-                    if !used.contains(index) {
-                        used.push(*index);
-                    }
-                    content.push_str("q\n");
-                    if let Some([cx, cy, cw, ch]) = clip {
+
+    /// Writes the pages, document objects and cross-reference table.
+    ///
+    /// # Errors
+    /// On write failure.
+    pub fn finish(mut self, title: &str, pages: &[Page]) -> std::io::Result<W> {
+        let n_images = self.images;
+        let first_image = FIRST_IMAGE;
+        let first_page = FIRST_IMAGE + n_images;
+        let page_obj = |i: usize| first_page + i * 2;
+        for (i, page) in pages.iter().enumerate() {
+            let mut content = String::new();
+            let mut used: Vec<usize> = Vec::new();
+            for op in &page.ops {
+                match op {
+                    Op::Image {
+                        index,
+                        x,
+                        y,
+                        w,
+                        h,
+                        clip,
+                    } => {
+                        if *index >= n_images {
+                            continue;
+                        }
+                        if !used.contains(index) {
+                            used.push(*index);
+                        }
+                        content.push_str("q\n");
+                        if let Some([cx, cy, cw, ch]) = clip {
+                            let _ = writeln!(
+                                content,
+                                "{} {} {} {} re W n",
+                                num(*cx),
+                                num(*cy),
+                                num(*cw),
+                                num(*ch)
+                            );
+                        }
                         let _ = writeln!(
                             content,
-                            "{} {} {} {} re W n",
-                            num(*cx),
-                            num(*cy),
-                            num(*cw),
-                            num(*ch)
+                            "{} 0 0 {} {} {} cm /Im{index} Do\nQ",
+                            num(*w),
+                            num(*h),
+                            num(*x),
+                            num(*y)
                         );
                     }
-                    let _ = writeln!(
-                        content,
-                        "{} 0 0 {} {} {} cm /Im{index} Do\nQ",
-                        num(*w),
-                        num(*h),
-                        num(*x),
-                        num(*y)
-                    );
-                }
-                Op::Line {
-                    from,
-                    to,
-                    width,
-                    grey,
-                } => {
-                    let _ = writeln!(
-                        content,
-                        "q {} w {} G {} {} m {} {} l S Q",
-                        num(*width),
-                        num(*grey),
-                        num(from.0),
-                        num(from.1),
-                        num(to.0),
-                        num(to.1)
-                    );
-                }
-                Op::Label { x, y, size, text } => {
-                    let _ = writeln!(
-                        content,
-                        "BT /F1 {} Tf {} {} Td {} Tj ET",
-                        num(*size),
-                        num(*x),
-                        num(*y),
-                        label_text(text)
-                    );
+                    Op::Line {
+                        from,
+                        to,
+                        width,
+                        grey,
+                    } => {
+                        let _ = writeln!(
+                            content,
+                            "q {} w {} G {} {} m {} {} l S Q",
+                            num(*width),
+                            num(*grey),
+                            num(from.0),
+                            num(from.1),
+                            num(to.0),
+                            num(to.1)
+                        );
+                    }
+                    Op::Label { x, y, size, text } => {
+                        let _ = writeln!(
+                            content,
+                            "BT /F1 {} Tf {} {} Td {} Tj ET",
+                            num(*size),
+                            num(*x),
+                            num(*y),
+                            label_text(text)
+                        );
+                    }
                 }
             }
-        }
-        let xobjects: Vec<String> = used
-            .iter()
-            .map(|i| format!("/Im{i} {} 0 R", first_image + i))
-            .collect();
-        let mut boxes = String::new();
-        if let Some(t) = page.trim {
-            let _ = write!(boxes, " /TrimBox {}", rect(t));
-        }
-        if let Some(b) = page.bleed {
-            let _ = write!(boxes, " /BleedBox {}", rect(b));
-        }
-        obj(
-            &mut out,
-            &mut offsets,
-            format!(
+            let xobjects: Vec<String> = used
+                .iter()
+                .map(|i| format!("/Im{i} {} 0 R", first_image + i))
+                .collect();
+            let mut boxes = String::new();
+            if let Some(t) = page.trim {
+                let _ = write!(boxes, " /TrimBox {}", rect(t));
+            }
+            if let Some(b) = page.bleed {
+                let _ = write!(boxes, " /BleedBox {}", rect(b));
+            }
+            let dict = format!(
                 "<< /Type /Page /Parent 2 0 R /MediaBox {}{boxes} \
                  /Resources << /XObject << {} >> /Font << /F1 4 0 R >> >> /Contents {} 0 R >>",
                 rect([0.0, 0.0, page.media.0, page.media.1]),
                 xobjects.join(" "),
                 page_obj(i) + 1
-            )
-            .as_bytes(),
+            );
+            self.obj(page_obj(i), &[dict.as_bytes()])?;
+            let head = format!("<< /Length {} >>\nstream\n", content.len());
+            self.obj(
+                page_obj(i) + 1,
+                &[head.as_bytes(), content.as_bytes(), b"\nendstream"],
+            )?;
+        }
+        let kids: Vec<String> = (0..pages.len())
+            .map(|i| format!("{} 0 R", page_obj(i)))
+            .collect();
+        self.obj(1, &[b"<< /Type /Catalog /Pages 2 0 R >>"])?;
+        let tree = format!(
+            "<< /Type /Pages /Kids [{}] /Count {} >>",
+            kids.join(" "),
+            pages.len()
         );
-        let mut body = format!("<< /Length {} >>\nstream\n", content.len()).into_bytes();
-        body.extend_from_slice(content.as_bytes());
-        body.extend_from_slice(b"\nendstream");
-        obj(&mut out, &mut offsets, &body);
-    }
+        self.obj(2, &[tree.as_bytes()])?;
+        let info = format!(
+            "<< /Title {} /Creator (PrintNest) /Producer (PrintNest) >>",
+            text_string(title)
+        );
+        self.obj(3, &[info.as_bytes()])?;
+        self.obj(
+            4,
+            &[b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"],
+        )?;
 
-    let xref_at = out.len();
-    let mut xref = format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1);
-    for o in &offsets {
-        // Exactly 20 bytes per entry: trailing space + newline.
-        let _ = writeln!(xref, "{o:010} 00000 n ");
+        let mut offsets = std::mem::take(&mut self.offsets);
+        offsets.sort_unstable();
+        let size = offsets.len() + 1;
+        let xref_at = self.pos;
+        let mut xref = format!("xref\n0 {size}\n0000000000 65535 f \n");
+        for (_, o) in &offsets {
+            // Exactly 20 bytes per entry: trailing space + newline.
+            let _ = writeln!(xref, "{o:010} 00000 n ");
+        }
+        let _ = write!(
+            xref,
+            "trailer\n<< /Size {size} /Root 1 0 R /Info 3 0 R >>\nstartxref\n{xref_at}\n%%EOF\n"
+        );
+        self.put(xref.as_bytes())?;
+        self.w.flush()?;
+        Ok(self.w)
     }
-    let _ = write!(
-        xref,
-        "trailer\n<< /Size {} /Root 1 0 R /Info 3 0 R >>\nstartxref\n{xref_at}\n%%EOF\n",
-        offsets.len() + 1
-    );
-    out.extend_from_slice(xref.as_bytes());
-    out
+}
+
+/// Builds a whole file in memory (tests and small documents).
+#[must_use]
+pub fn write(title: &str, pages: &[Page], images: &[Jpeg]) -> Vec<u8> {
+    let build = || -> std::io::Result<Vec<u8>> {
+        let mut w = Writer::new(Vec::new())?;
+        for img in images {
+            w.add_image(img)?;
+        }
+        w.finish(title, pages)
+    };
+    build().unwrap_or_default()
 }
 
 #[cfg(test)]

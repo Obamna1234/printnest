@@ -26,6 +26,13 @@ use vello_cpu::{Image, ImageSource, Level, Pixmap, RenderContext, RenderSettings
 /// Largest page this renders, in pixels (≈ 600 MB while rendering).
 /// A0 at 300 ppi is 140 MP.
 pub const MAX_RENDER_PIXELS: u64 = 150_000_000;
+/// Most photo area painted on one page, as a multiple of the page's own
+/// area (a hostile project could otherwise stack hundreds of full-page
+/// photos and take many minutes per page).
+pub const MAX_PAINT_FACTOR: f64 = 12.0;
+/// Most photo pixels decoded for one page (≈ 400 MB as RGBA). Larger
+/// requests are scaled down proportionally.
+pub const MAX_PAGE_PHOTO_PIXELS: u64 = 100_000_000;
 /// Longest side the renderer supports.
 pub const MAX_RENDER_EDGE: u32 = u16::MAX as u32;
 
@@ -90,6 +97,10 @@ pub enum RenderError {
     TooLarge(u64, u64),
     #[error("resolution must be between 30 and 1200 ppi")]
     BadPpi,
+    #[error("cancelled")]
+    Cancelled,
+    #[error("this page has too many overlapping photos to render")]
+    TooComplex,
 }
 
 /// Millimetres from the artwork's top-left corner to the trim's.
@@ -193,18 +204,21 @@ fn element_transform(r: &Rect) -> Affine {
 }
 
 /// Renders page `page` of `project`. `photos` maps a project photo path to
-/// its decoded pixels; photos missing from the map are left out (preflight
-/// warns about them before export).
+/// its decoded pixels (taken by value: each is freed as soon as it has been
+/// converted, so only one extra copy exists at a time); photos missing from
+/// the map are left out. `cancelled` is polled between elements.
 ///
 /// # Errors
-/// If the page doesn't exist or is too large at `ppi`.
+/// If the page doesn't exist, is too large at `ppi`, paints far more photo
+/// area than a real design would, or is cancelled.
 pub fn render_page(
     project: &Project,
     product: &Product,
     page: usize,
-    photos: &HashMap<String, Arc<Photo>>,
+    mut photos: HashMap<String, Arc<Photo>>,
     ppi: f64,
     area: Area,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<Raster, RenderError> {
     let pg = project.pages.get(page).ok_or(RenderError::NoPage(page))?;
     let (w, h) = page_pixels(product, area, ppi)?;
@@ -223,8 +237,38 @@ pub fn render_page(
     ctx.set_paint(colour(parse_colour(&pg.background)));
     ctx.fill_rect(&KRect::new(0.0, 0.0, f64::from(w), f64::from(h)));
 
-    let mut pixmaps: HashMap<&str, Arc<Pixmap>> = HashMap::new();
+    // Bound the work: total photo area painted, relative to the page.
+    let page_area = {
+        let (aw, ah) = area_mm(product, area);
+        aw * ah
+    };
+    let painted: f64 = pg
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            Element::Photo {
+                rect, src: Some(_), ..
+            } => Some(rect.w * rect.h),
+            Element::Photo { .. } | Element::Text { .. } => None,
+        })
+        .sum();
+    if !(painted.is_finite() && painted <= page_area * MAX_PAINT_FACTOR) {
+        return Err(RenderError::TooComplex);
+    }
+    // Convert each photo once, dropping the decoded copy straight away.
+    let keys: Vec<String> = photos.keys().cloned().collect();
+    let mut pixmaps: HashMap<String, Arc<Pixmap>> = HashMap::new();
+    for key in keys {
+        if let Some(photo) = photos.remove(&key)
+            && let Some(pm) = to_pixmap(&photo)
+        {
+            pixmaps.insert(key, Arc::new(pm));
+        }
+    }
     for el in &pg.elements {
+        if cancelled() {
+            return Err(RenderError::Cancelled);
+        }
         match el {
             Element::Photo {
                 rect,
@@ -232,18 +276,8 @@ pub fn render_page(
                 crop,
                 ..
             } => {
-                let Some(photo) = photos.get(src.as_str()) else {
+                let Some(pm) = pixmaps.get(src.as_str()).map(Arc::clone) else {
                     continue;
-                };
-                let pm = match pixmaps.get(src.as_str()) {
-                    Some(pm) => Arc::clone(pm),
-                    None => {
-                        let Some(pm) = to_pixmap(photo).map(Arc::new) else {
-                            continue;
-                        };
-                        pixmaps.insert(src.as_str(), Arc::clone(&pm));
-                        pm
-                    }
                 };
                 let (iw, ih) = (f64::from(pm.width()), f64::from(pm.height()));
                 let Some(v) = crop_view(
@@ -312,10 +346,18 @@ pub fn render_page(
     })
 }
 
-/// Longest edge (in photo pixels) worth decoding for `src` on this page:
-/// enough for `ppi`, capped at the decoder's preview limit.
+/// Longest edge (in photo pixels) worth decoding for `src` on this page so
+/// it prints at `ppi`: the photo's on-paper size comes from its real
+/// dimensions `size` and each frame's crop. Capped at `max`.
 #[must_use]
-pub fn needed_edge(project: &Project, page: usize, src: &str, ppi: f64, max: u32) -> u32 {
+pub fn needed_edge(
+    project: &Project,
+    page: usize,
+    src: &str,
+    size: (u32, u32),
+    ppi: f64,
+    max: u32,
+) -> u32 {
     let Some(pg) = project.pages.get(page) else {
         return 0;
     };
@@ -328,10 +370,11 @@ pub fn needed_edge(project: &Project, page: usize, src: &str, ppi: f64, max: u32
             ..
         } = el
             && s.as_str() == src
+            && let Some(v) = crop_view(rect.w, rect.h, size.0, size.1, crop)
         {
-            // Visible part spans the frame; the whole photo is larger by zoom.
-            let edge_mm = rect.w.max(rect.h) * crop.zoom.max(1.0);
-            need = need.max(edge_mm / 25.4 * ppi * 1.5);
+            // Whole photo's long side on paper, in output pixels.
+            let long_mm = f64::from(size.0.max(size.1)) * v.mm_per_px;
+            need = need.max(long_mm / 25.4 * ppi);
         }
     }
     if need.is_finite() {
@@ -339,6 +382,25 @@ pub fn needed_edge(project: &Project, page: usize, src: &str, ppi: f64, max: u32
     } else {
         max
     }
+}
+
+/// Scales the requested edges down so their total pixels fit
+/// [`MAX_PAGE_PHOTO_PIXELS`]. `edges` pairs each request with the photo's
+/// aspect (short side / long side, 0..=1).
+#[must_use]
+pub fn fit_budget(edges: &[(u32, f64)]) -> Vec<u32> {
+    let px = |e: u32, a: f64| f64::from(e) * f64::from(e) * a.clamp(0.0, 1.0);
+    let total: f64 = edges.iter().map(|&(e, a)| px(e, a)).sum();
+    let budget = MAX_PAGE_PHOTO_PIXELS as f64;
+    let k = if total > budget {
+        (budget / total).sqrt()
+    } else {
+        1.0
+    };
+    edges
+        .iter()
+        .map(|&(e, _)| ((f64::from(e) * k).floor() as u32).max(1))
+        .collect()
 }
 
 #[cfg(test)]

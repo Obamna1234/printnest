@@ -10,9 +10,11 @@ use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{FontRef, GlyphId, MetadataProvider};
 use vello_cpu::kurbo::BezPath;
 
-/// A bundled font.
+/// A bundled font plus the same fallbacks the editor uses, so characters
+/// shown on screen also print (and only those).
 pub(crate) struct Face {
     font: Option<FontRef<'static>>,
+    fallbacks: Vec<FontRef<'static>>,
 }
 
 impl Face {
@@ -25,6 +27,9 @@ impl Face {
         };
         Face {
             font: FontRef::new(bytes).ok(),
+            // The editor ships without egui's emoji fonts, so neither draws
+            // emoji; add fonts here if the editor ever gains them.
+            fallbacks: Vec::new(),
         }
     }
 }
@@ -69,29 +74,60 @@ fn glyph(font: &FontRef<'_>, c: char) -> Option<GlyphId> {
     font.charmap().map(c).filter(|g| g.to_u32() != 0)
 }
 
+/// The font that has `c` (primary first) and its glyph.
+fn pick<'f>(
+    primary: &'f FontRef<'static>,
+    fallbacks: &'f [FontRef<'static>],
+    c: char,
+) -> Option<(&'f FontRef<'static>, GlyphId)> {
+    std::iter::once(primary)
+        .chain(fallbacks.iter())
+        .find_map(|f| glyph(f, c).map(|g| (f, g)))
+}
+
 fn advance(font: &FontRef<'_>, gm: &GlyphMetrics<'_>, c: char) -> f64 {
     glyph(font, c)
         .and_then(|g| gm.advance_width(g))
         .map_or(0.0, f64::from)
 }
 
-fn width(font: &FontRef<'_>, gm: &GlyphMetrics<'_>, s: &str) -> f64 {
-    s.chars().map(|c| advance(font, gm, c)).sum()
+/// Advance of `c` in whichever font draws it (fallbacks at size `size`).
+fn advance_any(
+    face: &Face,
+    primary: &FontRef<'static>,
+    gm: &GlyphMetrics<'_>,
+    size: Size,
+    c: char,
+) -> f64 {
+    if glyph(primary, c).is_some() {
+        return advance(primary, gm, c);
+    }
+    match pick(primary, &face.fallbacks, c) {
+        Some((f, g)) => f
+            .glyph_metrics(size, LocationRef::default())
+            .advance_width(g)
+            .map_or(0.0, f64::from),
+        None => 0.0,
+    }
+}
+
+fn width(adv: &dyn Fn(char) -> f64, s: &str) -> f64 {
+    s.chars().map(adv).sum()
 }
 
 /// Greedy word wrap of one paragraph into lines no wider than `max`.
-fn wrap(font: &FontRef<'_>, gm: &GlyphMetrics<'_>, para: &str, max: f64) -> Vec<String> {
+fn wrap(adv: &dyn Fn(char) -> f64, para: &str, max: f64) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
     let mut line_w = 0.0;
     for word in para.split_inclusive(' ') {
-        let w = width(font, gm, word);
-        let trimmed_w = width(font, gm, word.trim_end_matches(' '));
+        let w = width(adv, word);
+        let trimmed_w = width(adv, word.trim_end_matches(' '));
         if line_w + trimmed_w <= max || line.is_empty() {
             if line.is_empty() && trimmed_w > max {
                 // A word longer than the box: break it by character.
                 for c in word.chars() {
-                    let cw = advance(font, gm, c);
+                    let cw = adv(c);
                     if line_w + cw > max && !line.is_empty() {
                         lines.push(std::mem::take(&mut line));
                         line_w = 0.0;
@@ -133,13 +169,13 @@ pub(crate) fn layout(
     let loc = LocationRef::default();
     let m = font.metrics(size, loc);
     let gm = font.glyph_metrics(size, loc);
-    let outlines = font.outline_glyphs();
+    let adv = |c: char| advance_any(face, font, &gm, size, c);
     let line_h = f64::from(m.ascent - m.descent + m.leading);
     let mut out = Vec::new();
     let mut baseline = rect.y + f64::from(m.ascent);
     for para in text.split('\n') {
-        for line in wrap(font, &gm, para, rect.w) {
-            let lw = width(font, &gm, &line);
+        for line in wrap(&adv, para, rect.w) {
+            let lw = width(&adv, &line);
             let mut x = match align {
                 Align::Left => rect.x,
                 Align::Center => rect.x + (rect.w - lw) / 2.0,
@@ -147,8 +183,8 @@ pub(crate) fn layout(
             };
             let mut path = BezPath::new();
             for c in line.chars() {
-                if let Some(g) = glyph(font, c) {
-                    if let Some(o) = outlines.get(g) {
+                if let Some((f, g)) = pick(font, &face.fallbacks, c) {
+                    if let Some(o) = f.outline_glyphs().get(g) {
                         let mut pen = Pen {
                             path: &mut path,
                             x,
@@ -156,7 +192,7 @@ pub(crate) fn layout(
                         };
                         let _ = o.draw(DrawSettings::unhinted(size, loc), &mut pen);
                     }
-                    x += gm.advance_width(g).map_or(0.0, f64::from);
+                    x += adv(c);
                 }
             }
             if !path.elements().is_empty() {
@@ -178,13 +214,14 @@ mod tests {
         let font = face.font.as_ref().unwrap();
         let size = Size::new(10.0);
         let gm = font.glyph_metrics(size, LocationRef::default());
-        let one = width(font, &gm, "hello");
-        let lines = wrap(font, &gm, "hello world again", one * 1.6);
+        let adv = |c: char| advance(font, &gm, c);
+        let one = width(&adv, "hello");
+        let lines = wrap(&adv, "hello world again", one * 1.6);
         assert_eq!(lines, vec!["hello", "world", "again"]);
-        let long = wrap(font, &gm, "abcdefghijklmnop", one);
+        let long = wrap(&adv, "abcdefghijklmnop", one);
         assert!(long.len() > 1);
         assert_eq!(long.concat(), "abcdefghijklmnop");
-        assert_eq!(wrap(font, &gm, "", 10.0), vec![String::new()]);
+        assert_eq!(wrap(&adv, "", 10.0), vec![String::new()]);
     }
 
     #[test]

@@ -194,14 +194,17 @@ impl Editor {
         self.history.retarget_photo(old, new);
     }
 
-    /// Where the bytes of every photo the design uses live (validated).
-    pub fn photo_sources(&self) -> std::collections::HashMap<String, std::path::PathBuf> {
+    /// Where the bytes of every photo the design uses live. Project
+    /// photos are re-checked on every read (symlinks, escapes).
+    pub fn photo_sources(&self) -> std::collections::HashMap<String, Origin> {
         self.project
             .photo_paths()
             .into_iter()
             .filter_map(|k| {
-                let path = self.library.origin(k.as_str())?.path(k).ok()?;
-                Some((k.as_str().to_owned(), path))
+                Some((
+                    k.as_str().to_owned(),
+                    self.library.origin(k.as_str())?.clone(),
+                ))
             })
             .collect()
     }
@@ -340,10 +343,14 @@ impl Editor {
 
     // ------------------------------------------------------------------ UI
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, catalogue: &Catalogue) -> Vec<Request> {
+    /// `modal`: a dialog is open, so keyboard shortcuts must not edit the
+    /// design behind it.
+    pub fn ui(&mut self, ui: &mut egui::Ui, catalogue: &Catalogue, modal: bool) -> Vec<Request> {
         let mut requests = Vec::new();
         self.library.poll(ui.ctx());
-        self.shortcuts(ui.ctx(), &mut requests);
+        if !modal {
+            self.shortcuts(ui.ctx(), &mut requests);
+        }
 
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui, &mut requests));
         egui::Panel::bottom("tray")

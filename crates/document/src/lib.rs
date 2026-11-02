@@ -33,6 +33,8 @@ use std::path::{Path, PathBuf};
 
 /// File name of the design inside a project folder.
 pub const PROJECT_FILE: &str = "project.json";
+/// Autosaved changes not yet saved by the user (crash recovery).
+pub const RECOVERY_FILE: &str = "project.recovery.json";
 /// Extension of project folders.
 pub const FOLDER_EXT: &str = "printnest";
 
@@ -211,11 +213,53 @@ impl ProjectFolder {
         Ok(())
     }
 
-    /// Writes the design atomically.
+    /// Writes the design atomically, and removes any autosaved recovery
+    /// copy (it is now out of date).
     ///
     /// # Errors
     /// If the project is invalid, too large to reopen, or the write fails.
     pub fn save(&self, project: &Project, catalogue: &Catalogue) -> Result<(), DocError> {
+        self.write_json(PROJECT_FILE, project, catalogue)?;
+        let _ = fs::remove_file(self.root.join(RECOVERY_FILE));
+        Ok(())
+    }
+
+    /// Autosave: writes unsaved changes to the recovery file, never to
+    /// `project.json` (the user's own save stays untouched until they save).
+    ///
+    /// # Errors
+    /// As [`Self::save`].
+    pub fn save_recovery(&self, project: &Project, catalogue: &Catalogue) -> Result<(), DocError> {
+        self.write_json(RECOVERY_FILE, project, catalogue)
+    }
+
+    /// Autosaved changes newer than the last save, if any (validated like
+    /// `project.json`).
+    #[must_use]
+    pub fn recovery(&self, catalogue: &Catalogue) -> Option<Project> {
+        let rec = self.root.join(RECOVERY_FILE);
+        let main = self.root.join(PROJECT_FILE);
+        let newer = match (fs::symlink_metadata(&rec), fs::symlink_metadata(&main)) {
+            (Ok(r), Ok(m)) => r.is_file() && r.modified().ok()? >= m.modified().ok()?,
+            _ => false,
+        };
+        if !newer {
+            return None;
+        }
+        self.load_file(RECOVERY_FILE, catalogue).ok()
+    }
+
+    /// Deletes the recovery file (the user chose not to restore it).
+    pub fn discard_recovery(&self) {
+        let _ = fs::remove_file(self.root.join(RECOVERY_FILE));
+    }
+
+    fn write_json(
+        &self,
+        file: &str,
+        project: &Project,
+        catalogue: &Catalogue,
+    ) -> Result<(), DocError> {
         project.validate(catalogue)?;
         let mut json = project.to_json_compact()?;
         json.push('\n');
@@ -227,7 +271,7 @@ impl ProjectFolder {
             .find_map(|n| {
                 let tmp = self
                     .root
-                    .join(format!(".{PROJECT_FILE}.{}.{n}.tmp", std::process::id()));
+                    .join(format!(".{file}.{}.{n}.tmp", std::process::id()));
                 OpenOptions::new()
                     .write(true)
                     .create_new(true)
@@ -241,7 +285,7 @@ impl ProjectFolder {
             .and_then(|()| f.sync_all())
             .and_then(|()| {
                 drop(f);
-                fs::rename(&tmp, self.root.join(PROJECT_FILE))
+                fs::rename(&tmp, self.root.join(file))
             });
         if let Err(e) = written {
             let _ = fs::remove_file(&tmp);
@@ -261,7 +305,11 @@ impl ProjectFolder {
     /// # Errors
     /// If the file is missing, too large, invalid or escapes the folder.
     pub fn load(&self, catalogue: &Catalogue) -> Result<Project, DocError> {
-        let path = self.root.join(PROJECT_FILE);
+        self.load_file(PROJECT_FILE, catalogue)
+    }
+
+    fn load_file(&self, file: &str, catalogue: &Catalogue) -> Result<Project, DocError> {
+        let path = self.root.join(file);
         let meta = fs::symlink_metadata(&path).map_err(io)?;
         if !meta.is_file() {
             return Err(DocError::NotAProject);
@@ -592,6 +640,27 @@ mod tests {
             Err(DocError::TooLarge(_))
         ));
         assert_eq!(folder.load(&cat).unwrap(), p);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn autosave_goes_to_recovery_and_save_clears_it() {
+        let cat = Catalogue::builtin().unwrap();
+        let base = tmp("recovery");
+        let folder = ProjectFolder::create(&base, "R").unwrap();
+        let saved = Project::new_blank(&cat, "print-6x4", "saved").unwrap();
+        folder.save(&saved, &cat).unwrap();
+        assert!(folder.recovery(&cat).is_none());
+        let mut edited = saved.clone();
+        edited.title = "edited".into();
+        folder.save_recovery(&edited, &cat).unwrap();
+        // project.json is untouched; the recovery copy is offered.
+        assert_eq!(folder.load(&cat).unwrap(), saved);
+        assert_eq!(folder.recovery(&cat), Some(edited.clone()));
+        // An explicit save removes it.
+        folder.save(&edited, &cat).unwrap();
+        assert!(folder.recovery(&cat).is_none());
+        assert!(!folder.root().join(RECOVERY_FILE).exists());
         let _ = fs::remove_dir_all(&base);
     }
 }

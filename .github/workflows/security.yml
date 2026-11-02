@@ -149,8 +149,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
+      actions: read
+      contents: read
       security-events: write
     steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -171,6 +176,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
+      actions: read
+      contents: read
       security-events: write
     steps:
       - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
@@ -184,17 +191,33 @@ jobs:
       # Open-source pattern rules for Rust, GitHub Actions and leaked
       # secrets. Every finding goes to Code scanning; ERROR-severity ones
       # fail the job.
+      # Every "nosemgrep" suppression must be listed in a CODEOWNERS-protected
+      # file, so nobody can silence a rule without review.
+      - name: Suppressions are reviewed
+        run: |
+          git grep -n "nosemgrep" -- '*.rs' \
+            | sed -E 's/^([^:]+):[0-9]+:.*nosemgrep: ([^ ]+).*/\1 \2/' | sort > "$RUNNER_TEMP/found.txt"
+          if ! diff -u .github/semgrep-allowlist.txt "$RUNNER_TEMP/found.txt"; then
+            echo "::error::nosemgrep comments changed; update .github/semgrep-allowlist.txt (needs code-owner review)"
+            exit 1
+          fi
       - name: Scan
+        id: scan
         run: |
           # Report goes outside the checkout so it is never scanned itself.
           ~/.local/bin/semgrep scan --metrics=off \
             --config p/rust --config p/github-actions --config p/secrets \
             --text --sarif-output="$RUNNER_TEMP/semgrep.sarif" .
+          echo "sarif=yes" >> "$GITHUB_OUTPUT"
           ~/.local/bin/semgrep scan --metrics=off --quiet \
             --config p/rust --config p/github-actions --config p/secrets \
             --severity ERROR --error .
       - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
-        if: always()
+        # Fork PRs get a read-only token, so they skip the upload.
+        if: >-
+          always() && steps.scan.outputs.sarif == 'yes' &&
+          (github.event_name != 'pull_request' ||
+           github.event.pull_request.head.repo.full_name == github.repository)
         with:
           sarif_file: ${{ runner.temp }}/semgrep.sarif
           category: semgrep
