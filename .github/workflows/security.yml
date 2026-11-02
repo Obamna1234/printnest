@@ -186,14 +186,15 @@ jobs:
       # fail the job.
       - name: Scan
         run: |
+          # Report goes outside the checkout so it is never scanned itself.
           ~/.local/bin/semgrep scan --metrics=off \
             --config p/rust --config p/github-actions --config p/secrets \
-            --sarif --output semgrep.sarif .
-          ~/.local/bin/semgrep scan --metrics=off \
+            --text --sarif-output="$RUNNER_TEMP/semgrep.sarif" .
+          ~/.local/bin/semgrep scan --metrics=off --quiet \
             --config p/rust --config p/github-actions --config p/secrets \
             --severity ERROR --error .
       - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
-        if: always() && hashFiles('semgrep.sarif') != ''
+        if: always()
         with:
-          sarif_file: semgrep.sarif
+          sarif_file: ${{ runner.temp }}/semgrep.sarif
           category: semgrep
