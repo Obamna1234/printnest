@@ -14,7 +14,7 @@ printnest-model.workspace = true
 printnest-layout.workspace = true
 thiserror.workspace = true
 # Already used by the GUI (egui) for text; reused so prints match the screen.
-vello_cpu = { version = "=0.2.0", default-features = false, features = ["std", "u8_pipeline"] }
+vello_cpu = { version = "=0.3.0", default-features = false, features = ["std", "u8_pipeline"] }
 skrifa = { version = "=0.44.0", default-features = false, features = ["std"] }
 epaint_default_fonts = "=0.37.0"
 
