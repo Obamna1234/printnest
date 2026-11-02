@@ -296,7 +296,9 @@ a human test print per minor release.
   PDF with bleed/trim boxes and crop marks, home A4/Letter PDF (one sheet
   or tiled with overlap), preflight, `printnest-cli export`. PDFs hold one
   300 ppi image per page; true PDF/X-4 (output intent, vector text) is a
-  later step. Next: export dialog in the app, autosave, background saving.]
+  later step. Export dialog (design check, progress, cancel), autosave
+  every 60 s and a golden render test are done. Still to do: saving on a
+  background thread, crash recovery for never-saved designs.]
 - **M5 Photo books** — spreads, covers, spine, layouts, auto-layout.
 - **M6 Wall decor** — framed prints + mats, canvas wrap templates.
 - **M7 Calendars and cards.**
