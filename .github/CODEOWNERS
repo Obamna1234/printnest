@@ -19,6 +19,7 @@
 /crates/sandbox/                @Obamna1234
 /crates/imaging/                @Obamna1234
 /crates/document/               @Obamna1234
+/crates/export/                 @Obamna1234
 /fuzz/                          @Obamna1234
 /AGENTS.md                      @Obamna1234
 /SPEC.md                        @Obamna1234

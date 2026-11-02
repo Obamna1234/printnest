@@ -102,6 +102,19 @@ jobs:
           if $cli photo "$tmp/fake.jpg"; then
             echo "::error::a non-image was accepted as a photo"; exit 1
           fi
+          # Export end to end in every profile: new files only, valid output.
+          mkdir "$tmp/Smoke.printnest" "$tmp/out"
+          $cli new print-6x4 --out "$tmp/Smoke.printnest/project.json" --title "Smoke"
+          for profile in kiosk shop home-a4 home-letter; do
+            $cli export "$tmp/Smoke.printnest" --profile "$profile" --out "$tmp/out"
+          done
+          test -s "$tmp/out/Smoke - kiosk/Smoke.jpg"
+          head -c 8 "$tmp/out/Smoke - print shop/Smoke - print shop.pdf" | grep -q '%PDF-1.4'
+          test -s "$tmp/out/Smoke - home A4/Smoke - A4.pdf"
+          test -s "$tmp/out/Smoke - home Letter/Smoke - Letter.pdf"
+          # A second export must not touch the first.
+          $cli export "$tmp/Smoke.printnest" --profile kiosk --out "$tmp/out"
+          test -d "$tmp/out/Smoke - kiosk (2)"
 
   msrv-lockfile:
     name: Lockfile is up to date

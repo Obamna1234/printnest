@@ -7,7 +7,8 @@ Linux, then print at home or take the file to a photo kiosk or print shop.
 > Status: **early development** (milestones 0–3 of 9). You can pick a
 > product (poster, print, canvas, card…), lay out photos and text on it with
 > crop, rotate, snapping, undo and print-sharpness badges, and save/open
-> projects. Exporting print files arrives in milestone 4. See
+> projects. Exporting print files (kiosk JPEGs, print-shop and home-printer
+> PDFs) is being built in milestone 4 and works from the command line. See
 > [SPEC.md](SPEC.md) for the plan.
 
 ## Privacy and security promise

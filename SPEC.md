@@ -84,7 +84,7 @@ crates/layout           crop/ppi maths, hit-testing, snap,
 crates/document         project folder load/save, imports   [M3]
 crates/render           print rasteriser                    [M4]
 crates/imaging          decode + adjustments (in worker)    [M2]
-crates/export           JPEG, PDF/X, tiling, templates      [M4]
+crates/export           JPEG, PDF, tiling, preflight        [M4]
 crates/sandbox          worker process, IPC, limits         [M2]
 catalogue/              product data (TOML)
 assets/                 original/CC0 assets + ASSETS.md
@@ -291,7 +291,12 @@ a human test print per minor release.
   backups: saving runs on the UI thread (large photos pause the window),
   and very large text at high zoom re-renders slowly.]
 - **M4 Export v1** — kiosk JPEG, PDF/X, home print, preflight, golden tests.
-  First public beta.
+  First public beta. [in progress: renderer (the editor's own drawing
+  engine and fonts, so prints match the screen), kiosk JPEGs, print-shop
+  PDF with bleed/trim boxes and crop marks, home A4/Letter PDF (one sheet
+  or tiled with overlap), preflight, `printnest-cli export`. PDFs hold one
+  300 ppi image per page; true PDF/X-4 (output intent, vector text) is a
+  later step. Next: export dialog in the app, autosave, background saving.]
 - **M5 Photo books** — spreads, covers, spine, layouts, auto-layout.
 - **M6 Wall decor** — framed prints + mats, canvas wrap templates.
 - **M7 Calendars and cards.**

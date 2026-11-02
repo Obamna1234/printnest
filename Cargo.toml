@@ -6,6 +6,8 @@ members = [
     "crates/sandbox",
     "crates/layout",
     "crates/document",
+    "crates/render",
+    "crates/export",
     "apps/printnest-cli",
     "apps/printnest",
 ]
@@ -27,6 +29,8 @@ printnest-imaging = { path = "crates/imaging" }
 printnest-sandbox = { path = "crates/sandbox" }
 printnest-layout = { path = "crates/layout" }
 printnest-document = { path = "crates/document" }
+printnest-render = { path = "crates/render" }
+printnest-export = { path = "crates/export" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }

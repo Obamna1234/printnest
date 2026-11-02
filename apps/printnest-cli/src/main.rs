@@ -27,7 +27,14 @@ USAGE:
     printnest-cli validate <file.json>
     printnest-cli dpi <product> <pixels-wide> <pixels-high>
     printnest-cli photo <image-file> [--product <product>]
+    printnest-cli export <project-folder> --profile <profile> --out <folder>
     printnest-cli --version | --help
+
+PROFILES (export):
+    kiosk         JPEGs for photo kiosks and online labs
+    shop          print-shop PDF with bleed and crop marks
+    home-a4       home printer, A4 (large designs tile over several sheets)
+    home-letter   home printer, US Letter
 
 FAMILIES:
     print poster framed canvas book calendar card gift
@@ -118,6 +125,7 @@ fn run(args: &[String]) -> Result<(), Failure> {
         "validate" => cmd_validate(&catalogue, rest),
         "dpi" => cmd_dpi(&catalogue, rest),
         "photo" => cmd_photo(&catalogue, rest),
+        "export" => cmd_export(&catalogue, rest),
         other => Err(usage(format!("unknown command {other:?}"))),
     }
 }
@@ -329,6 +337,84 @@ fn cmd_dpi(catalogue: &Catalogue, args: &[String]) -> Result<(), Failure> {
         fmt_size(art),
         p.name
     );
+    Ok(())
+}
+
+fn cmd_export(catalogue: &Catalogue, args: &[String]) -> Result<(), Failure> {
+    use printnest_export::{Paper, Profile, Severity};
+    let (pos, flags) = parse_flags(args, &["profile", "out"])?;
+    let [path] = pos.as_slice() else {
+        return Err(usage("export needs exactly one project folder"));
+    };
+    let profile = match flag(&flags, "profile") {
+        Some("kiosk") => Profile::Kiosk,
+        Some("shop") => Profile::PrintShop,
+        Some("home-a4") => Profile::Home(Paper::A4),
+        Some("home-letter") => Profile::Home(Paper::Letter),
+        Some(other) => return Err(usage(format!("unknown profile {other:?}"))),
+        None => return Err(usage("export needs --profile")),
+    };
+    let out = flag(&flags, "out").ok_or_else(|| usage("export needs --out <folder>"))?;
+    let out = std::path::Path::new(out);
+    if !out.is_dir() {
+        return Err(bad(format!("{}: not a folder", out.display())));
+    }
+    let (folder, project) =
+        printnest_document::open(std::path::Path::new(path), catalogue).map_err(bad)?;
+    let product = product(catalogue, &project.product)?;
+    let worker = printnest_sandbox::Worker::current_exe().map_err(bad)?;
+
+    // Preflight needs each photo's full size: probe them in the sandbox.
+    let mut sizes = std::collections::HashMap::new();
+    for src in project.photo_paths() {
+        if let Ok(bytes) = folder.read_photo(src)
+            && let Ok(info) = worker.probe(&bytes)
+        {
+            sizes.insert(src.as_str().to_owned(), (info.width, info.height));
+        }
+    }
+    let issues = printnest_export::preflight(&project, product, &sizes);
+    for i in &issues {
+        let tag = match i.severity {
+            Severity::Problem => "PROBLEM",
+            Severity::Warning => "warning",
+        };
+        eprintln!("{tag} (page {}): {}", i.page, i.message);
+    }
+
+    let mut loader = |src: &str, edge: u32| {
+        let key = printnest_model::SafePath::new(src).ok()?;
+        let bytes = folder.read_photo(&key).ok()?;
+        let p = worker.preview(&bytes, edge).ok()?;
+        Some(std::sync::Arc::new(printnest_render::Photo {
+            width: p.width,
+            height: p.height,
+            rgba: p.rgba,
+        }))
+    };
+    let mut progress = |done: usize, total: usize| {
+        eprintln!("rendered page {done} of {total}");
+        true
+    };
+    let report =
+        printnest_export::export(&project, product, profile, out, &mut loader, &mut progress)
+            .map_err(bad)?;
+    println!(
+        "exported to {} at {:.0} ppi:",
+        report.folder.display(),
+        report.ppi
+    );
+    for f in &report.files {
+        println!(
+            "  {}",
+            f.file_name()
+                .map(|n| n.to_string_lossy())
+                .unwrap_or_default()
+        );
+    }
+    if issues.iter().any(|i| i.severity == Severity::Problem) {
+        return Err(bad("exported, but some photos are missing (see above)"));
+    }
     Ok(())
 }
 

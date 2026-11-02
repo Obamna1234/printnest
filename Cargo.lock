@@ -2210,7 +2210,10 @@ dependencies = [
 name = "printnest-cli"
 version = "0.1.0"
 dependencies = [
+ "printnest-document",
+ "printnest-export",
  "printnest-model",
+ "printnest-render",
  "printnest-sandbox",
 ]
 
@@ -2220,6 +2223,17 @@ version = "0.1.0"
 dependencies = [
  "printnest-model",
  "printnest-sandbox",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "printnest-export"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "printnest-layout",
+ "printnest-model",
+ "printnest-render",
  "thiserror 2.0.21",
 ]
 
@@ -2247,6 +2261,18 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "toml",
+]
+
+[[package]]
+name = "printnest-render"
+version = "0.1.0"
+dependencies = [
+ "epaint_default_fonts",
+ "printnest-layout",
+ "printnest-model",
+ "skrifa",
+ "thiserror 2.0.21",
+ "vello_cpu",
 ]
 
 [[package]]

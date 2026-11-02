@@ -1,0 +1,21 @@
+[package]
+name = "printnest-export"
+description = "PrintNest export: kiosk JPEGs, print-shop and home-printer PDFs, preflight"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+printnest-model.workspace = true
+printnest-layout.workspace = true
+printnest-render.workspace = true
+thiserror.workspace = true
+# JPEG *encoding* only (our own pixels; nothing untrusted is decoded here).
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
+
+[lints]
+workspace = true
