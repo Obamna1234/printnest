@@ -182,6 +182,10 @@ pub struct Project {
     pub cover: Option<String>,
     #[serde(deserialize_with = "bounded::pages")]
     pub pages: Vec<Page>,
+    /// The book cover as one flat sheet: back, spine, front (left to
+    /// right), in mm from the top-left of the trimmed cover. Books only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_design: Option<Page>,
 }
 
 impl Project {
@@ -213,6 +217,7 @@ impl Project {
             title: title.into(),
             product: product.id.clone(),
             paper,
+            cover_design: product.has_cover_design().then(Page::default),
             cover,
             pages,
         };
@@ -287,7 +292,7 @@ impl Project {
     pub fn photo_paths(&self) -> Vec<&SafePath> {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
-        for page in &self.pages {
+        for page in self.pages.iter().chain(self.cover_design.iter()) {
             for el in &page.elements {
                 if let Element::Photo { src: Some(p), .. } = el
                     && seen.insert(p)
@@ -335,9 +340,17 @@ impl Project {
             )));
         }
 
+        if self.cover_design.is_some() && !product.has_cover_design() {
+            return Err(invalid(format!("{} has no cover to design", product.name)));
+        }
         let mut ids = HashSet::new();
-        for (n, page) in self.pages.iter().enumerate() {
-            let page_no = n + 1;
+        let labelled = self
+            .pages
+            .iter()
+            .enumerate()
+            .map(|(n, p)| ((n + 1).to_string(), p))
+            .chain(self.cover_design.iter().map(|p| ("cover".to_owned(), p)));
+        for (page_no, page) in labelled {
             check_colour(&page.background)
                 .map_err(|e| invalid(format!("page {page_no} background: {e}")))?;
             if page.elements.len() > MAX_ELEMENTS_PER_PAGE {

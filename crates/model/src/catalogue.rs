@@ -285,6 +285,12 @@ impl Product {
         self.papers.iter().any(|p| p == paper_id)
     }
 
+    /// Whether projects for this product have a designable cover (books).
+    #[must_use]
+    pub fn has_cover_design(&self) -> bool {
+        !self.covers.is_empty()
+    }
+
     /// Spine width for a book with `pages` pages on `paper` with `cover`.
     ///
     /// Each sheet (leaf) carries two pages, so the paper stack is

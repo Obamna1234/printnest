@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod book;
 pub mod crop;
 pub mod edit;
 pub mod geometry;
