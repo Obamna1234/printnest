@@ -2206,6 +2206,7 @@ dependencies = [
  "printnest-model",
  "printnest-render",
  "printnest-sandbox",
+ "serde_json",
 ]
 
 [[package]]

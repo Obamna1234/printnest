@@ -29,6 +29,7 @@ printnest-layout.workspace = true
 printnest-document.workspace = true
 printnest-export.workspace = true
 printnest-render.workspace = true
+serde_json.workspace = true
 
 # Only the features we need. No "persistence" (no hidden state files), no
 # "wgpu", no web features. Resolver 3 keeps these per-target sets separate.

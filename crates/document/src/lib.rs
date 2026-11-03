@@ -35,6 +35,10 @@ use std::path::{Path, PathBuf};
 pub const PROJECT_FILE: &str = "project.json";
 /// Autosaved changes not yet saved by the user (crash recovery).
 pub const RECOVERY_FILE: &str = "project.recovery.json";
+/// Folder inside a project holding earlier saves.
+pub const BACKUP_DIR: &str = "backups";
+/// How many earlier saves are kept (SPEC section 5).
+pub const MAX_BACKUPS: u32 = 10;
 /// Extension of project folders.
 pub const FOLDER_EXT: &str = "printnest";
 
@@ -219,9 +223,53 @@ impl ProjectFolder {
     /// # Errors
     /// If the project is invalid, too large to reopen, or the write fails.
     pub fn save(&self, project: &Project, catalogue: &Catalogue) -> Result<(), DocError> {
+        project.validate(catalogue)?;
+        // Keep the previous save (best effort: a failed backup never
+        // blocks saving the user's work).
+        let _ = self.backup();
         self.write_json(PROJECT_FILE, project, catalogue)?;
         let _ = fs::remove_file(self.root.join(RECOVERY_FILE));
         Ok(())
+    }
+
+    /// Copies the current `project.json` to `backups/project-1.json`,
+    /// shifting older ones up and dropping the oldest beyond
+    /// [`MAX_BACKUPS`]. Never follows symlinks.
+    fn backup(&self) -> Result<(), DocError> {
+        let current = self.root.join(PROJECT_FILE);
+        match fs::symlink_metadata(&current) {
+            Ok(m) if m.is_file() => {}
+            _ => return Ok(()), // nothing saved yet
+        }
+        let dir = self.root.join(BACKUP_DIR);
+        match fs::symlink_metadata(&dir) {
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => return Err(DocError::Escape(BACKUP_DIR.into())),
+            Err(_) => fs::create_dir(&dir).map_err(io)?,
+        }
+        let name = |n: u32| dir.join(format!("project-{n}.json"));
+        let _ = fs::remove_file(name(MAX_BACKUPS));
+        for n in (1..MAX_BACKUPS).rev() {
+            if fs::symlink_metadata(name(n)).is_ok_and(|m| m.is_file()) {
+                fs::rename(name(n), name(n + 1)).map_err(io)?;
+            }
+        }
+        let bytes = read_capped(&current)?;
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(name(1))
+            .map_err(io)?;
+        f.write_all(&bytes).and_then(|()| f.sync_all()).map_err(io)
+    }
+
+    /// The earlier saves kept in `backups/`, newest first.
+    #[must_use]
+    pub fn backups(&self) -> Vec<PathBuf> {
+        (1..=MAX_BACKUPS)
+            .map(|n| self.root.join(BACKUP_DIR).join(format!("project-{n}.json")))
+            .filter(|p| fs::symlink_metadata(p).is_ok_and(|m| m.is_file()))
+            .collect()
     }
 
     /// Autosave: writes unsaved changes to the recovery file, never to
@@ -246,6 +294,13 @@ impl ProjectFolder {
         if !newer {
             return None;
         }
+        self.load_file(RECOVERY_FILE, catalogue).ok()
+    }
+
+    /// The recovery file regardless of age (for the app's own recovery
+    /// folder, which has no project.json to compare with).
+    #[must_use]
+    pub fn recovery_any(&self, catalogue: &Catalogue) -> Option<Project> {
         self.load_file(RECOVERY_FILE, catalogue).ok()
     }
 
@@ -661,6 +716,52 @@ mod tests {
         folder.save(&edited, &cat).unwrap();
         assert!(folder.recovery(&cat).is_none());
         assert!(!folder.root().join(RECOVERY_FILE).exists());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn saves_keep_the_last_ten_versions() {
+        let cat = Catalogue::builtin().unwrap();
+        let base = tmp("backups");
+        let folder = ProjectFolder::create(&base, "B").unwrap();
+        let mut p = Project::new_blank(&cat, "print-6x4", "v0").unwrap();
+        folder.save(&p, &cat).unwrap();
+        assert!(
+            folder.backups().is_empty(),
+            "first save has nothing to back up"
+        );
+        for i in 1..=14 {
+            p.title = format!("v{i}");
+            folder.save(&p, &cat).unwrap();
+        }
+        let backups = folder.backups();
+        assert_eq!(backups.len(), MAX_BACKUPS as usize);
+        // Newest backup is the save before the current one.
+        let newest = fs::read_to_string(&backups[0]).unwrap();
+        assert!(newest.contains("\"v13\""), "{newest}");
+        let oldest = fs::read_to_string(&backups[9]).unwrap();
+        assert!(oldest.contains("\"v4\""), "{oldest}");
+        assert_eq!(folder.load(&cat).unwrap().title, "v14");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_backups_symlink_is_not_followed() {
+        let cat = Catalogue::builtin().unwrap();
+        let base = tmp("backuplink");
+        let outside = base.join("outside");
+        fs::create_dir(&outside).unwrap();
+        let folder = ProjectFolder::create(&base, "L").unwrap();
+        std::os::unix::fs::symlink(&outside, folder.root().join(BACKUP_DIR)).unwrap();
+        let p = Project::new_blank(&cat, "print-6x4", "x").unwrap();
+        folder.save(&p, &cat).unwrap();
+        folder.save(&p, &cat).unwrap(); // saving still works
+        assert_eq!(
+            fs::read_dir(&outside).unwrap().count(),
+            0,
+            "nothing written outside"
+        );
         let _ = fs::remove_dir_all(&base);
     }
 }

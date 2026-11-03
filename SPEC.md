@@ -303,8 +303,14 @@ a human test print per minor release.
   done. Hardening from review: per-page photo memory budget, bounded
   paint work, cancel inside a page, undecodable photos reported, PDFs
   streamed to disk, `.partial` files until complete, failed exports
-  removed. Still to do: saving on a background thread, recovery for
-  never-saved designs, rotating backups, PDF/X-4.]
+  removed. Saving runs in the background; never-saved designs are
+  recovered from the app's settings folder after a crash; every save keeps
+  the previous 10 versions in `backups/`. [done]
+  PDF/X-4 (decision): not shipped. It needs a printer-class colour profile
+  and there is no free PDF/X validator to prove conformance, so the
+  print-shop PDF stays a plain PDF of 300 ppi images with bleed, trim
+  box and crop marks, which shops accept. Revisit with colour management
+  (soft-proof, M9).]
 - **M5 Photo books** — spreads, covers, spine, layouts, auto-layout.
 - **M6 Wall decor** — framed prints + mats, canvas wrap templates.
 - **M7 Calendars and cards.**

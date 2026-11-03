@@ -12,6 +12,7 @@ mod export_dialog;
 mod library;
 mod picker;
 mod preview;
+mod recovery;
 mod start;
 
 use editor::{Editor, Request};
@@ -76,12 +77,19 @@ struct App {
     export: Option<export_dialog::ExportDialog>,
     /// Autosaved changes offered for restoring after opening a project.
     restore: Option<Project>,
+    /// A never-saved design recovered from the last session.
+    recovered: Option<(Project, Vec<(SafePath, std::path::PathBuf)>)>,
+    /// A save running in the background (editing waits for it).
+    saving: Option<(ProjectFolder, std::sync::mpsc::Receiver<SaveDone>)>,
     last_autosave: std::time::Instant,
 }
 
 impl App {
     fn new(catalogue: Catalogue) -> Self {
+        let recovered = recovery::load(&catalogue);
         App {
+            recovered,
+            saving: None,
             start: StartScreen::new(catalogue.clone()),
             catalogue,
             editor: None,
@@ -129,72 +137,70 @@ impl App {
         }
     }
 
-    /// Copies the photos the design uses into `folder` (from disk, or from
-    /// the project it was opened from), then writes project.json. A photo
-    /// counts as saved only once its copy succeeded; failures are shown.
+    /// Starts saving into `folder` on a background thread: copies the photos
+    /// the design uses (from disk, or from the project it was opened from),
+    /// then writes project.json. Editing pauses until it finishes.
     fn save_into(&mut self, folder: ProjectFolder) {
-        let Some(ed) = self.editor.as_mut() else {
+        if self.saving.is_some() {
+            return;
+        }
+        let Some(ed) = self.editor.as_ref() else {
             return;
         };
-        let mut problems = Vec::new();
-        let mut missing = Vec::new();
         let mut taken = ed.library.keys();
-        taken.extend(folder.photo_names());
         let used: Vec<SafePath> = ed.project.photo_paths().into_iter().cloned().collect();
         taken.extend(used.iter().map(|k| k.as_str().to_owned()));
+        let mut plan = Vec::new();
         for key in used {
             let source = match ed.library.origin(key.as_str()) {
                 Some(Origin::Project(f)) if *f == folder => continue,
                 Some(origin) => origin.path(&key),
                 None => Err("not found".to_owned()),
             };
-            // A photo already missing from the project it came from can't be
-            // copied; that's reported but doesn't block a clean save.
-            if let Ok(src) = &source
-                && std::fs::symlink_metadata(src).is_err()
-            {
-                missing.push(display_name(key.as_str()));
-                continue;
-            }
-            let result = source.and_then(|src| import_unique(&folder, &key, &src, &mut taken));
-            match result {
-                Ok(stored) => {
-                    if stored != key {
-                        ed.retarget_photo(&key, &stored);
-                    }
-                    ed.library.saved_as(&key, &stored, &folder);
-                }
-                Err(e) => problems.push(format!(
-                    "{}: {}",
-                    display_name(key.as_str()),
-                    display_name(&e)
-                )),
-            }
+            plan.push((key, source));
         }
-        // Title from the folder name, minus anything that can't be shown.
-        let name: String = folder
-            .root()
-            .file_stem()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-            .chars()
-            .filter(|c| !c.is_control() && !is_deceptive(*c))
-            .take(200)
-            .collect();
-        if !name.trim().is_empty() {
-            ed.project.title = name;
+        let job = SaveJob {
+            folder: folder.clone(),
+            project: ed.project.clone(),
+            plan,
+            taken,
+        };
+        let catalogue = self.catalogue.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(job.run(&catalogue));
+        });
+        self.saving = Some((folder, rx));
+    }
+
+    /// Applies a finished background save.
+    fn finish_save(&mut self, folder: ProjectFolder, done: SaveDone) {
+        let Some(ed) = self.editor.as_mut() else {
+            return;
+        };
+        for (key, stored) in &done.stored {
+            if stored != key {
+                ed.retarget_photo(key, stored);
+            }
+            ed.library.saved_as(key, stored, &folder);
         }
-        match folder.save(&ed.project, &self.catalogue) {
+        if let Some(title) = &done.title {
+            ed.project.title.clone_from(title);
+        }
+        match done.result {
             Ok(()) => {
                 ed.folder = Some(folder);
-                if problems.is_empty() {
+                // A design saved for the first time no longer needs the
+                // app-level recovery copy.
+                recovery::clear();
+                if done.problems.is_empty() {
                     ed.dirty = false;
                     ed.status = "Saved.".into();
-                    if !missing.is_empty() {
+                    if !done.missing.is_empty() {
                         self.message = Some(format!(
                             "Saved. These photos were already missing from the project \
                              and still are:\n\n{}",
-                            missing.join("\n")
+                            done.missing.join("\n")
                         ));
                     }
                 } else {
@@ -203,7 +209,7 @@ impl App {
                     self.message = Some(format!(
                         "The design was saved, but these photos couldn't be copied \
                          into the project and will be missing when it's reopened:\n\n{}",
-                        problems.join("\n")
+                        done.problems.join("\n")
                     ));
                 }
             }
@@ -219,7 +225,9 @@ impl App {
         let idle = self.picker.is_none()
             && self.confirm.is_none()
             && self.message.is_none()
-            && self.export.is_none();
+            && self.export.is_none()
+            && self.saving.is_none()
+            && self.recovered.is_none();
         let Some(ed) = self.editor.as_ref() else {
             return;
         };
@@ -227,23 +235,41 @@ impl App {
             return;
         }
         self.last_autosave = std::time::Instant::now();
-        if let Some(folder) = ed.folder.clone() {
-            let result = folder.save_recovery(&ed.project, &self.catalogue);
-            if let Some(ed) = self.editor.as_mut() {
-                // Never a pop-up from autosave: just the status line.
-                ed.status = match result {
-                    Ok(()) => "Changes autosaved for recovery (not yet saved).".into(),
-                    Err(e) => format!("Autosave failed: {e}"),
-                };
+        let result = match ed.folder.clone() {
+            Some(folder) => folder
+                .save_recovery(&ed.project, &self.catalogue)
+                .map_err(|e| e.to_string()),
+            // Never saved: keep a copy in the app's own settings folder,
+            // with where its photos are.
+            None => {
+                let sources: Vec<_> = ed
+                    .project
+                    .photo_paths()
+                    .into_iter()
+                    .filter_map(|k| match ed.library.origin(k.as_str()) {
+                        Some(Origin::External(p)) => Some((k.clone(), p.clone())),
+                        Some(Origin::Project(_)) | None => None,
+                    })
+                    .collect();
+                recovery::save(&ed.project, &self.catalogue, &sources)
             }
+        };
+        if let Some(ed) = self.editor.as_mut() {
+            // Never a pop-up from autosave: just the status line.
+            ed.status = match result {
+                Ok(()) => "Changes autosaved for recovery (not yet saved).".into(),
+                Err(e) => format!("Autosave failed: {e}"),
+            };
         }
     }
 
     /// The user agreed to throw away unsaved changes: forget the recovery
     /// copy too.
     fn forget_recovery(&self) {
-        if let Some(f) = self.editor.as_ref().and_then(|e| e.folder.as_ref()) {
-            f.discard_recovery();
+        match self.editor.as_ref().map(|e| e.folder.as_ref()) {
+            Some(Some(f)) => f.discard_recovery(),
+            Some(None) => recovery::clear(),
+            None => {}
         }
     }
 
@@ -384,6 +410,57 @@ impl App {
             });
         }
 
+        if let Some((folder, rx)) = &self.saving {
+            match rx.try_recv() {
+                Ok(done) => {
+                    let folder = folder.clone();
+                    self.saving = None;
+                    self.finish_save(folder, done);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                    egui::Modal::new(egui::Id::unique("saving")).show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Saving… copying photos into the project");
+                        });
+                    });
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.saving = None;
+                    self.message = Some("Couldn't save: the save stopped unexpectedly.".into());
+                }
+            }
+        }
+
+        if self.recovered.is_some() && self.editor.is_none() {
+            egui::Modal::new(egui::Id::unique("recovered")).show(ctx, |ui| {
+                ui.heading("Recovered design");
+                ui.label(
+                    "A design you hadn't saved yet was found from your last session. \
+                     Open it?",
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Open it").clicked()
+                        && let Some((project, sources)) = self.recovered.take()
+                        && let Some(prod) = self.catalogue.product(&project.product).cloned()
+                    {
+                        let mut ed = Editor::new(project, prod, None);
+                        for (key, path) in sources {
+                            ed.library.add(key, Origin::External(path));
+                        }
+                        ed.dirty = true;
+                        ed.status = "Recovered. Save it to keep it.".into();
+                        self.editor = Some(ed);
+                    }
+                    if ui.button("Discard it").clicked() {
+                        self.recovered = None;
+                        recovery::clear();
+                    }
+                });
+            });
+        }
+
         if self.restore.is_some() {
             egui::Modal::new(egui::Id::unique("restore")).show(ctx, |ui| {
                 ui.heading("Unsaved changes found");
@@ -444,6 +521,11 @@ impl eframe::App for App {
             // Closing stops the export; its folder is cleaned up.
             d.cancel();
         }
+        // A save in progress finishes first (it takes seconds at most), so
+        // photo copies are never cut off.
+        if self.saving.is_some() && ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
         // Closing the window with unsaved changes asks first.
         let dirty = self.editor.as_ref().is_some_and(|e| e.dirty);
         if ctx.input(|i| i.viewport().close_requested()) && dirty && !self.closing {
@@ -481,7 +563,8 @@ impl eframe::App for App {
                 || self.confirm.is_some()
                 || self.message.is_some()
                 || self.export.is_some()
-                || self.restore.is_some();
+                || self.restore.is_some()
+                || self.saving.is_some();
             requests = ed.ui(ui, &self.catalogue, modal);
         } else if let Some(action) = self.start.ui(ui) {
             match action {
@@ -499,6 +582,81 @@ impl eframe::App for App {
         }
         self.autosave();
         self.dialogs(&ctx);
+    }
+}
+
+/// Everything a background save needs (a snapshot: editing is paused).
+struct SaveJob {
+    folder: ProjectFolder,
+    project: Project,
+    /// Each photo to copy and where its bytes are.
+    plan: Vec<(SafePath, Result<std::path::PathBuf, String>)>,
+    taken: std::collections::HashSet<String>,
+}
+
+/// What a background save did.
+#[derive(Debug)]
+struct SaveDone {
+    /// (name in the design, name it was stored under).
+    stored: Vec<(SafePath, SafePath)>,
+    title: Option<String>,
+    missing: Vec<String>,
+    problems: Vec<String>,
+    result: Result<(), String>,
+}
+
+impl SaveJob {
+    fn run(mut self, catalogue: &Catalogue) -> SaveDone {
+        let folder = &self.folder;
+        self.taken.extend(folder.photo_names());
+        let (mut stored, mut missing, mut problems) = (Vec::new(), Vec::new(), Vec::new());
+        for (key, source) in std::mem::take(&mut self.plan) {
+            // A photo already missing from where it came from can't be
+            // copied; that's reported but doesn't block a clean save.
+            if let Ok(src) = &source
+                && std::fs::symlink_metadata(src).is_err()
+            {
+                missing.push(display_name(key.as_str()));
+                continue;
+            }
+            match source.and_then(|src| import_unique(folder, &key, &src, &mut self.taken)) {
+                Ok(new) => {
+                    if new != key {
+                        printnest_layout::edit::retarget_photo(&mut self.project, &key, &new);
+                    }
+                    stored.push((key, new));
+                }
+                Err(e) => problems.push(format!(
+                    "{}: {}",
+                    display_name(key.as_str()),
+                    display_name(&e)
+                )),
+            }
+        }
+        // Title from the folder name, minus anything that can't be shown.
+        let name: String = folder
+            .root()
+            .file_stem()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+            .chars()
+            .filter(|c| !c.is_control() && !is_deceptive(*c))
+            .take(200)
+            .collect();
+        let title = (!name.trim().is_empty()).then_some(name);
+        if let Some(t) = &title {
+            self.project.title.clone_from(t);
+        }
+        let result = folder
+            .save(&self.project, catalogue)
+            .map_err(|e| e.to_string());
+        SaveDone {
+            stored,
+            title,
+            missing,
+            problems,
+            result,
+        }
     }
 }
 
