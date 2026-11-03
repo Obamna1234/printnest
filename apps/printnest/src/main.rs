@@ -78,7 +78,11 @@ struct App {
     /// Autosaved changes offered for restoring after opening a project.
     restore: Option<Project>,
     /// A never-saved design recovered from the last session.
-    recovered: Option<(Project, Vec<(SafePath, std::path::PathBuf)>)>,
+    recovered: Option<recovery::Recovered>,
+    /// The window was asked to close while a save was running.
+    close_after_save: bool,
+    /// Send a Close command on the next frame.
+    close_requested: bool,
     /// A save running in the background (editing waits for it).
     saving: Option<(ProjectFolder, std::sync::mpsc::Receiver<SaveDone>)>,
     last_autosave: std::time::Instant,
@@ -89,6 +93,8 @@ impl App {
         let recovered = recovery::load(&catalogue);
         App {
             recovered,
+            close_after_save: false,
+            close_requested: false,
             saving: None,
             start: StartScreen::new(catalogue.clone()),
             catalogue,
@@ -195,7 +201,11 @@ impl App {
                 recovery::clear();
                 if done.problems.is_empty() {
                     ed.dirty = false;
-                    ed.status = "Saved.".into();
+                    ed.status = if done.backed_up {
+                        "Saved.".into()
+                    } else {
+                        "Saved (the previous version couldn't be kept in backups/).".into()
+                    };
                     if !done.missing.is_empty() {
                         self.message = Some(format!(
                             "Saved. These photos were already missing from the project \
@@ -214,6 +224,16 @@ impl App {
                 }
             }
             Err(e) => self.message = Some(format!("Couldn't save: {e}")),
+        }
+        // Closing was requested during the save: close now if nothing is
+        // left unsaved, otherwise ask as usual.
+        if std::mem::take(&mut self.close_after_save) {
+            if self.editor.as_ref().is_some_and(|e| e.dirty) || self.message.is_some() {
+                self.confirm = Some(AfterDiscard::Close);
+            } else {
+                self.closing = true;
+                self.close_requested = true;
+            }
         }
     }
 
@@ -246,10 +266,9 @@ impl App {
                     .project
                     .photo_paths()
                     .into_iter()
-                    .filter_map(|k| match ed.library.origin(k.as_str()) {
-                        Some(Origin::External(p)) => Some((k.clone(), p.clone())),
-                        Some(Origin::Project(_)) | None => None,
-                    })
+                    // Every photo, wherever it is now (including ones a
+                    // failed first save already copied somewhere).
+                    .filter_map(|k| Some((k.clone(), ed.library.origin(k.as_str())?.path(k).ok()?)))
                     .collect();
                 recovery::save(&ed.project, &self.catalogue, &sources)
             }
@@ -419,12 +438,25 @@ impl App {
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
                     ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                    let mut give_up = false;
                     egui::Modal::new(egui::Id::unique("saving")).show(ctx, |ui| {
                         ui.horizontal(|ui| {
                             ui.spinner();
                             ui.label("Saving… copying photos into the project");
                         });
+                        if self.close_after_save {
+                            ui.label("PrintNest will close when saving finishes.");
+                            if ui.button("Close now without waiting").clicked() {
+                                give_up = true;
+                            }
+                        }
                     });
+                    if give_up {
+                        // Files already copied are complete; the one in
+                        // progress may be left half-written.
+                        self.closing = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.saving = None;
@@ -442,9 +474,11 @@ impl App {
                 );
                 ui.horizontal(|ui| {
                     if ui.button("Open it").clicked()
-                        && let Some((project, sources)) = self.recovered.take()
+                        && let Some((dir, project, sources)) = self.recovered.take()
                         && let Some(prod) = self.catalogue.product(&project.product).cloned()
                     {
+                        // From now on this run's own autosave keeps it.
+                        recovery::forget(&dir);
                         let mut ed = Editor::new(project, prod, None);
                         for (key, path) in sources {
                             ed.library.add(key, Origin::External(path));
@@ -453,9 +487,10 @@ impl App {
                         ed.status = "Recovered. Save it to keep it.".into();
                         self.editor = Some(ed);
                     }
-                    if ui.button("Discard it").clicked() {
-                        self.recovered = None;
-                        recovery::clear();
+                    if ui.button("Discard it").clicked()
+                        && let Some((dir, _, _)) = self.recovered.take()
+                    {
+                        recovery::forget(&dir);
                     }
                 });
             });
@@ -509,6 +544,9 @@ impl eframe::App for App {
         };
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
 
+        if std::mem::take(&mut self.close_requested) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         // Closing mid-export would leave half the files written.
         let exporting = self
             .export
@@ -521,14 +559,20 @@ impl eframe::App for App {
             // Closing stops the export; its folder is cleaned up.
             d.cancel();
         }
-        // A save in progress finishes first (it takes seconds at most), so
-        // photo copies are never cut off.
-        if self.saving.is_some() && ctx.input(|i| i.viewport().close_requested()) {
+        // A save in progress finishes first, so photo copies are never cut
+        // off; the window then closes by itself (or the user can stop
+        // waiting from the Saving dialog).
+        if self.saving.is_some() && !self.closing && ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.close_after_save = true;
         }
         // Closing the window with unsaved changes asks first.
         let dirty = self.editor.as_ref().is_some_and(|e| e.dirty);
-        if ctx.input(|i| i.viewport().close_requested()) && dirty && !self.closing {
+        if ctx.input(|i| i.viewport().close_requested())
+            && dirty
+            && !self.closing
+            && self.saving.is_none()
+        {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.confirm = Some(AfterDiscard::Close);
         }
@@ -602,6 +646,8 @@ struct SaveDone {
     title: Option<String>,
     missing: Vec<String>,
     problems: Vec<String>,
+    /// Whether the previous version was kept in backups/.
+    backed_up: bool,
     result: Result<(), String>,
 }
 
@@ -647,14 +693,16 @@ impl SaveJob {
         if let Some(t) = &title {
             self.project.title.clone_from(t);
         }
-        let result = folder
-            .save(&self.project, catalogue)
-            .map_err(|e| e.to_string());
+        let (result, backed_up) = match folder.save_reporting(&self.project, catalogue) {
+            Ok(b) => (Ok(()), b),
+            Err(e) => (Err(e.to_string()), true),
+        };
         SaveDone {
             stored,
             title,
             missing,
             problems,
+            backed_up,
             result,
         }
     }

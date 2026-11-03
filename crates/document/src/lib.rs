@@ -223,13 +223,38 @@ impl ProjectFolder {
     /// # Errors
     /// If the project is invalid, too large to reopen, or the write fails.
     pub fn save(&self, project: &Project, catalogue: &Catalogue) -> Result<(), DocError> {
+        self.save_reporting(project, catalogue).map(|_| ())
+    }
+
+    /// As [`Self::save`], also saying whether the previous version could be
+    /// kept in `backups/` (`false`: saved, but no backup was made).
+    ///
+    /// # Errors
+    /// As [`Self::save`].
+    pub fn save_reporting(
+        &self,
+        project: &Project,
+        catalogue: &Catalogue,
+    ) -> Result<bool, DocError> {
         project.validate(catalogue)?;
-        // Keep the previous save (best effort: a failed backup never
-        // blocks saving the user's work).
-        let _ = self.backup();
-        self.write_json(PROJECT_FILE, project, catalogue)?;
+        let mut json = project.to_json_compact()?;
+        json.push('\n');
+        let current = self.root.join(PROJECT_FILE);
+        let unchanged = fs::symlink_metadata(&current).is_ok_and(|m| m.is_file())
+            && read_capped(&current).is_ok_and(|b| b == json.as_bytes());
+        let backed_up = if unchanged {
+            // Nothing new: don't rotate (repeated saves would otherwise push
+            // every real version out of backups/).
+            true
+        } else {
+            // Best effort: a failed backup never blocks saving the work.
+            self.backup().is_ok()
+        };
+        if !unchanged {
+            self.write_json(PROJECT_FILE, project, catalogue)?;
+        }
         let _ = fs::remove_file(self.root.join(RECOVERY_FILE));
-        Ok(())
+        Ok(backed_up)
     }
 
     /// Copies the current `project.json` to `backups/project-1.json`,
@@ -248,19 +273,30 @@ impl ProjectFolder {
             Err(_) => fs::create_dir(&dir).map_err(io)?,
         }
         let name = |n: u32| dir.join(format!("project-{n}.json"));
+        let bytes = read_capped(&current)?;
+        // Already kept (e.g. a save that failed after backing up): don't
+        // rotate again.
+        if read_capped(&name(1)).is_ok_and(|b| b == bytes) {
+            return Ok(());
+        }
         let _ = fs::remove_file(name(MAX_BACKUPS));
         for n in (1..MAX_BACKUPS).rev() {
             if fs::symlink_metadata(name(n)).is_ok_and(|m| m.is_file()) {
                 fs::rename(name(n), name(n + 1)).map_err(io)?;
             }
         }
-        let bytes = read_capped(&current)?;
         let mut f = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(name(1))
             .map_err(io)?;
-        f.write_all(&bytes).and_then(|()| f.sync_all()).map_err(io)
+        let written = f.write_all(&bytes).and_then(|()| f.sync_all());
+        drop(f);
+        written.map_err(|e| {
+            // Never leave a truncated backup (e.g. disk full).
+            let _ = fs::remove_file(name(1));
+            io(e)
+        })
     }
 
     /// The earlier saves kept in `backups/`, newest first.
@@ -742,6 +778,30 @@ mod tests {
         let oldest = fs::read_to_string(&backups[9]).unwrap();
         assert!(oldest.contains("\"v4\""), "{oldest}");
         assert_eq!(folder.load(&cat).unwrap().title, "v14");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn unchanged_saves_keep_the_history() {
+        let cat = Catalogue::builtin().unwrap();
+        let base = tmp("backupdup");
+        let folder = ProjectFolder::create(&base, "D").unwrap();
+        let mut p = Project::new_blank(&cat, "print-6x4", "v0").unwrap();
+        for i in 0..=3 {
+            p.title = format!("v{i}");
+            folder.save(&p, &cat).unwrap();
+        }
+        assert_eq!(folder.backups().len(), 3);
+        for _ in 0..20 {
+            folder.save(&p, &cat).unwrap();
+        }
+        let titles: Vec<String> = folder
+            .backups()
+            .iter()
+            .map(|b| fs::read_to_string(b).unwrap())
+            .collect();
+        assert_eq!(titles.len(), 3, "no duplicates added");
+        assert!(titles[0].contains("\"v2\"") && titles[2].contains("\"v0\""));
         let _ = fs::remove_dir_all(&base);
     }
 
