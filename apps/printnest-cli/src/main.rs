@@ -356,6 +356,11 @@ fn cmd_export(catalogue: &Catalogue, args: &[String]) -> Result<(), Failure> {
         None => return Err(usage("export needs --profile")),
     };
     let out = flag(&flags, "out").ok_or_else(|| usage("export needs --out <folder>"))?;
+    let wanted = match profile {
+        Profile::Kiosk => printnest_model::catalogue::ExportProfile::KioskJpeg,
+        Profile::PrintShop => printnest_model::catalogue::ExportProfile::PrintPdf,
+        Profile::Home(_) => printnest_model::catalogue::ExportProfile::Home,
+    };
     let out = std::path::Path::new(out);
     if !out.is_dir() {
         return Err(bad(format!("{}: not a folder", out.display())));
@@ -363,6 +368,12 @@ fn cmd_export(catalogue: &Catalogue, args: &[String]) -> Result<(), Failure> {
     let (folder, project) =
         printnest_document::open(std::path::Path::new(path), catalogue).map_err(bad)?;
     let product = product(catalogue, &project.product)?;
+    if !product.exports.contains(&wanted) {
+        return Err(bad(format!(
+            "{} can't be exported that way (see `printnest-cli info {}`)",
+            product.name, product.id
+        )));
+    }
     let worker = printnest_sandbox::Worker::current_exe().map_err(bad)?;
 
     // Preflight needs each photo's full size: probe them in the sandbox.

@@ -295,30 +295,70 @@ fn new_id_avoiding(project: &Project, prefix: &str, pending: &[Element]) -> Stri
 /// product allows that many. Returns the index of the first new page.
 pub fn add_pages(
     project: &mut Project,
-    rule: printnest_model::catalogue::PageRule,
+    product: &Product,
+    paper: Option<&Paper>,
     after: usize,
 ) -> Option<usize> {
+    let rule = product.page_rule();
     let count = u32::try_from(project.pages.len()).ok()?;
     let new_count = count.checked_add(rule.step)?;
     if !rule.allows(new_count) {
         return None;
     }
-    let at = (after + 1).min(project.pages.len());
+    let old = cover_geometry(project, product, paper);
+    let at = after.saturating_add(1).min(project.pages.len());
     for _ in 0..rule.step {
         project
             .pages
             .insert(at, printnest_model::project::Page::default());
     }
+    follow_spine(project, old, cover_geometry(project, product, paper));
     Some(at)
+}
+
+/// The cover layout for the project's current page count.
+fn cover_geometry(
+    project: &Project,
+    product: &Product,
+    paper: Option<&Paper>,
+) -> Option<CoverGeometry> {
+    let pages = u32::try_from(project.pages.len()).ok()?;
+    CoverGeometry::new(product, pages, paper?, project.cover.as_deref()?)
+}
+
+/// Keeps the cover design in place when the spine changes width: things
+/// on the front move with the front panel, things on the spine stay
+/// centred on it, the back doesn't move.
+pub fn follow_spine(project: &mut Project, old: Option<CoverGeometry>, new: Option<CoverGeometry>) {
+    let (Some(old), Some(new), Some(cover)) = (old, new, project.cover_design.as_mut()) else {
+        return;
+    };
+    let delta = new.spine_x1 - old.spine_x1;
+    if delta.abs() < 1e-9 {
+        return;
+    }
+    for el in &mut cover.elements {
+        let r = match el {
+            Element::Photo { rect, .. } | Element::Text { rect, .. } => rect,
+        };
+        let centre = r.x + r.w / 2.0;
+        if centre >= old.spine_x1 {
+            r.x += delta;
+        } else if centre > old.spine_x0 {
+            r.x += delta / 2.0;
+        }
+    }
 }
 
 /// Removes `rule.step` pages starting at `first`, if the product allows
 /// the smaller count and they all exist. Returns whether it did.
 pub fn remove_pages(
     project: &mut Project,
-    rule: printnest_model::catalogue::PageRule,
+    product: &Product,
+    paper: Option<&Paper>,
     first: usize,
 ) -> bool {
+    let rule = product.page_rule();
     let Ok(count) = u32::try_from(project.pages.len()) else {
         return false;
     };
@@ -329,7 +369,9 @@ pub fn remove_pages(
     if !rule.allows(new_count) || first.saturating_add(step) > project.pages.len() {
         return false;
     }
+    let old = cover_geometry(project, product, paper);
     project.pages.drain(first..first + step);
+    follow_spine(project, old, cover_geometry(project, product, paper));
     true
 }
 
@@ -551,21 +593,69 @@ mod tests {
     #[test]
     fn pages_are_added_and_removed_in_allowed_steps() {
         let (cat, mut p) = book();
-        let rule = cat.product("book-20x20").unwrap().page_rule();
+        let prod = cat.product("book-20x20").unwrap();
+        let paper = cat.paper(&p.paper);
         apply_layout(&mut p, 0, Layout::Single, &[], page_box(0));
-        assert_eq!(add_pages(&mut p, rule, 0), Some(1));
+        assert_eq!(add_pages(&mut p, prod, paper, 0), Some(1));
         assert_eq!(p.pages.len(), 22);
         assert_eq!(p.pages[0].elements.len(), 1, "existing page kept");
         assert!(p.pages[1].elements.is_empty() && p.pages[2].elements.is_empty());
         assert!(p.validate(&cat).is_ok());
-        assert!(remove_pages(&mut p, rule, 1));
+        assert!(remove_pages(&mut p, prod, paper, 1));
         assert_eq!(p.pages.len(), 20);
         // Can't go below the minimum or past the end.
-        assert!(!remove_pages(&mut p, rule, 0));
-        assert!(!remove_pages(&mut p, rule, 19));
+        assert!(!remove_pages(&mut p, prod, paper, 0));
+        assert!(!remove_pages(&mut p, prod, paper, 19));
         // Or above the maximum.
-        while add_pages(&mut p, rule, 0).is_some() {}
+        while add_pages(&mut p, prod, paper, 0).is_some() {}
         assert_eq!(p.pages.len(), 100);
+        assert!(p.validate(&cat).is_ok());
+    }
+
+    #[test]
+    fn the_front_cover_moves_with_the_spine() {
+        let (cat, mut p) = book();
+        p.cover = Some("hard".into());
+        let prod = cat.product("book-20x20").unwrap();
+        let paper = cat.paper(&p.paper);
+        let g0 = CoverGeometry::new(prod, 20, paper.unwrap(), "hard").unwrap();
+        let mk = |x: f64, w: f64| Rect {
+            x,
+            y: 20.0,
+            w,
+            h: 20.0,
+            rotation: 0.0,
+        };
+        let front = mk(g0.spine_x1 + 8.0, 100.0);
+        let mid = (g0.spine_x0 + g0.spine_x1) / 2.0;
+        let spine = mk(mid - 1.0, 2.0);
+        let back = mk(20.0, 50.0);
+        if let Some(c) = p.cover_design.as_mut() {
+            for (i, r) in [front, spine, back].into_iter().enumerate() {
+                c.elements.push(Element::Photo {
+                    id: format!("c{i}"),
+                    rect: r,
+                    src: None,
+                    crop: Crop::default(),
+                });
+            }
+        }
+        while add_pages(&mut p, prod, paper, 0).is_some() {}
+        let g1 = CoverGeometry::new(prod, 100, paper.unwrap(), "hard").unwrap();
+        let els = &p.cover_design.as_ref().unwrap().elements;
+        let x = |i: usize| els[i].rect().x;
+        assert!(
+            (x(0) - (g1.spine_x1 + 8.0)).abs() < 1e-9,
+            "front keeps its gap"
+        );
+        assert!(
+            (x(1) + 1.0 - (g1.spine_x0 + g1.spine_x1) / 2.0).abs() < 1e-9,
+            "spine centred"
+        );
+        assert!((x(2) - 20.0).abs() < 1e-9, "back doesn't move");
+        while remove_pages(&mut p, prod, paper, 0) {}
+        let els = &p.cover_design.as_ref().unwrap().elements;
+        assert!((els[0].rect().x - front.x).abs() < 1e-9);
         assert!(p.validate(&cat).is_ok());
     }
 }

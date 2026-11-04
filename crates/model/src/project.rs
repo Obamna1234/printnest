@@ -250,8 +250,16 @@ impl Project {
             Some(0) | None => return Err(ProjectError::WrongFormat),
             Some(_) => {}
         }
-        let project: Project =
+        let mut project: Project =
             serde_json::from_str(text).map_err(|e| ProjectError::Parse(e.to_string()))?;
+        // Books saved before covers could be designed get an empty one.
+        if project.cover_design.is_none()
+            && catalogue
+                .product(&project.product)
+                .is_some_and(Product::has_cover_design)
+        {
+            project.cover_design = Some(Page::default());
+        }
         project.validate(catalogue)?;
         Ok(project)
     }
@@ -859,5 +867,20 @@ mod tests {
         let c = cat();
         let deep = format!("{}{}", "[".repeat(100_000), "]".repeat(100_000));
         assert!(Project::from_json(&deep, &c).is_err());
+    }
+
+    #[test]
+    fn older_books_get_an_empty_cover_on_load() {
+        let c = Catalogue::builtin().expect("catalogue");
+        let mut p = Project::new_blank(&c, "book-20x20", "old").expect("book");
+        p.cover_design = None;
+        let json = p.to_json().expect("ser");
+        assert!(!json.contains("cover_design"));
+        let loaded = Project::from_json(&json, &c).expect("loads");
+        assert_eq!(loaded.cover_design, Some(Page::default()));
+        // Non-books stay without one.
+        let poster = Project::new_blank(&c, "poster-a4", "p").expect("poster");
+        let loaded = Project::from_json(&poster.to_json().expect("ser"), &c).expect("loads");
+        assert!(loaded.cover_design.is_none());
     }
 }

@@ -85,7 +85,11 @@ pub fn photo_path(original_name: &str, taken: &HashSet<String>) -> Option<SafePa
 /// Points every frame showing `old` at `new` instead (used when a photo
 /// had to be stored under a different name).
 pub fn retarget_photo(project: &mut Project, old: &SafePath, new: &SafePath) {
-    for el in project.pages.iter_mut().flat_map(|p| p.elements.iter_mut()) {
+    let pages = project
+        .pages
+        .iter_mut()
+        .chain(project.cover_design.iter_mut());
+    for el in pages.flat_map(|p| p.elements.iter_mut()) {
         if let Element::Photo { src: Some(s), .. } = el
             && s == old
         {

@@ -108,6 +108,8 @@ pub struct Editor {
     pub status: String,
     /// The book cover's layout (spine position), if this is a book.
     cover_geom: Option<CoverGeometry>,
+    /// The project's paper (its thickness sets the spine).
+    paper: Option<printnest_model::catalogue::Paper>,
     /// Layout chosen in the toolbar picker.
     layout: Layout,
 }
@@ -168,6 +170,7 @@ impl Editor {
             show_safe: true,
             status: String::new(),
             cover_geom: None,
+            paper: None,
             layout: Layout::Single,
         }
     }
@@ -189,6 +192,28 @@ impl Editor {
             return g.outer;
         }
         self.product.bleed_mm + self.product.wrap_mm.unwrap_or(0.0)
+    }
+
+    /// Where new frames and text go: the whole page, or on the cover the
+    /// front panel (width, height, x offset).
+    fn new_element_area(&self) -> (f64, f64, f64) {
+        if self.on_cover()
+            && let Some(g) = self.cover_geom
+        {
+            let (x, _, w, h) = g.front();
+            return (w, h, x);
+        }
+        let (w, h) = self.trim();
+        (w, h, 0.0)
+    }
+
+    /// Moves just-added element `i` right by `dx` mm.
+    fn shift_new(&mut self, i: usize, dx: f64) {
+        if dx != 0.0
+            && let Some(el) = self.element_mut(i)
+        {
+            rect_mut(el).x += dx;
+        }
     }
 
     /// Measurements a layout needs for the page being edited.
@@ -485,6 +510,7 @@ impl Editor {
     pub fn ui(&mut self, ui: &mut egui::Ui, catalogue: &Catalogue, modal: bool) -> Vec<Request> {
         let mut requests = Vec::new();
         self.library.poll(ui.ctx());
+        self.paper = catalogue.paper(&self.project.paper).cloned();
         self.cover_geom = self.project.cover.as_deref().and_then(|c| {
             let paper = catalogue.paper(&self.project.paper)?;
             let pages = u32::try_from(self.project.pages.len()).ok()?;
@@ -646,19 +672,21 @@ impl Editor {
                 requests.push(Request::Export);
             }
             if ui.button("Empty frame").clicked() {
-                let (w, h) = self.trim();
+                let (w, h, dx) = self.new_element_area();
                 let before = self.project.clone();
                 if let Ok(i) = edit::add_photo_frame(&mut self.project, self.page, w, h, None) {
+                    self.shift_new(i, dx);
                     self.recorded(&before);
                     self.selected = Some(i);
                 }
             }
             if ui.button("Add text").clicked() {
-                let (w, h) = self.trim();
+                let (w, h, dx) = self.new_element_area();
                 let before = self.project.clone();
                 if let Ok(i) =
                     edit::add_text(&mut self.project, self.page, w, h, self.product.safe_mm)
                 {
+                    self.shift_new(i, dx);
                     self.recorded(&before);
                     self.selected = Some(i);
                 }
@@ -702,7 +730,13 @@ impl Editor {
                         .clicked()
                     {
                         let before = self.project.clone();
-                        match book::add_pages(&mut self.project, rule, self.page) {
+                        let (product, paper) = (self.product.clone(), self.paper.clone());
+                        match book::add_pages(
+                            &mut self.project,
+                            &product,
+                            paper.as_ref(),
+                            self.page,
+                        ) {
                             Some(first) => {
                                 self.recorded(&before);
                                 self.page = first;
@@ -720,7 +754,13 @@ impl Editor {
                         .clicked()
                     {
                         let before = self.project.clone();
-                        if book::remove_pages(&mut self.project, rule, self.page) {
+                        let (product, paper) = (self.product.clone(), self.paper.clone());
+                        if book::remove_pages(
+                            &mut self.project,
+                            &product,
+                            paper.as_ref(),
+                            self.page,
+                        ) {
                             self.recorded(&before);
                             self.page = self.page.min(self.project.pages.len().saturating_sub(1));
                             self.selected = None;

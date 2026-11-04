@@ -142,6 +142,33 @@ pub fn preflight(
             }
         }
     }
+    // Cover text near a spine fold can wrap round the edge or crease.
+    if let (Some(c), Some(g)) = (&project.cover_design, cover) {
+        for el in &c.elements {
+            let Element::Text { text, .. } = el else {
+                continue;
+            };
+            let xs: Vec<f64> = corners(el.rect()).iter().map(|p| p.x).collect();
+            let (min_x, max_x) = xs
+                .iter()
+                .fold((f64::MAX, f64::MIN), |(a, b), x| (a.min(*x), b.max(*x)));
+            let on_spine = min_x >= g.spine_x0 - 0.01 && max_x <= g.spine_x1 + 0.01;
+            let near_fold = [g.spine_x0, g.spine_x1]
+                .iter()
+                .any(|f| min_x < f + safe && max_x > f - safe);
+            if near_fold && !on_spine && !text.trim().is_empty() {
+                out.push(Issue {
+                    severity: Severity::Warning,
+                    page: 0,
+                    message: format!(
+                        "Text \"{}\" crosses or sits close to a spine fold and may wrap \
+                         round the edge. Keep it on one panel, or within the spine.",
+                        short(text)
+                    ),
+                });
+            }
+        }
+    }
     out.sort_by(|a, b| b.severity.cmp(&a.severity).then(a.page.cmp(&b.page)));
     out
 }
@@ -261,5 +288,42 @@ mod tests {
                 .iter()
                 .all(|i| i.page != 0)
         );
+    }
+
+    #[test]
+    fn text_on_a_spine_fold_is_flagged() {
+        let cat = Catalogue::builtin().unwrap();
+        let prod = cat.product("book-20x20").unwrap().clone();
+        let mut p = Project::new_blank(&cat, "book-20x20", "b").unwrap();
+        let g = CoverGeometry::new(&prod, 20, cat.paper(&p.paper).unwrap(), "soft").unwrap();
+        let text = |id: &str, x: f64, w: f64| Element::Text {
+            id: id.into(),
+            rect: Rect {
+                x,
+                y: 50.0,
+                w,
+                h: 10.0,
+                rotation: 0.0,
+            },
+            text: id.into(),
+            font: "sans".into(),
+            size_pt: 12.0,
+            colour: "#000000".into(),
+            align: Align::Left,
+        };
+        if let Some(c) = p.cover_design.as_mut() {
+            c.elements.push(text("across", g.spine_x0 - 20.0, 40.0));
+            c.elements
+                .push(text("onspine", g.spine_x0, g.spine_x1 - g.spine_x0));
+            c.elements.push(text("front", g.spine_x1 + 30.0, 80.0));
+        }
+        let issues = preflight(&p, &prod, Some(g), &HashMap::new());
+        let msgs: Vec<&str> = issues.iter().map(|i| i.message.as_str()).collect();
+        assert!(
+            msgs.iter().any(|m| m.contains("\"across\" crosses")),
+            "{msgs:?}"
+        );
+        assert!(!msgs.iter().any(|m| m.contains("onspine")), "{msgs:?}");
+        assert!(!msgs.iter().any(|m| m.contains("\"front\"")), "{msgs:?}");
     }
 }

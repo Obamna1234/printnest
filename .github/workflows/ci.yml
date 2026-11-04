@@ -104,7 +104,7 @@ jobs:
           fi
           # Export end to end in every profile: new files only, valid output.
           mkdir "$tmp/Smoke.printnest" "$tmp/out"
-          $cli new print-6x4 --out "$tmp/Smoke.printnest/project.json" --title "Smoke"
+          $cli new poster-a4 --out "$tmp/Smoke.printnest/project.json" --title "Smoke"
           for profile in kiosk shop home-a4 home-letter; do
             $cli export "$tmp/Smoke.printnest" --profile "$profile" --out "$tmp/out"
           done
@@ -119,8 +119,9 @@ jobs:
           # give byte-identical files, with no camera metadata.
           mkdir -p "$tmp/Photo.printnest/photos" "$tmp/out2" "$tmp/out3"
           cp tests/fixtures/rotated-64x48.jpg "$tmp/Photo.printnest/photos/p.jpg"
-          sed 's#"elements": \[\]#"elements": [{"type":"photo","id":"x","rect":{"x":-3,"y":-3,"w":158.4,"h":107.6,"rotation":0},"src":"photos/p.jpg"}]#' \
-            "$tmp/print.json" > "$tmp/Photo.printnest/project.json"
+          $cli new poster-a4 --out "$tmp/poster.json"
+          sed 's#"elements": \[\]#"elements": [{"type":"photo","id":"x","rect":{"x":-3,"y":-3,"w":216,"h":303,"rotation":0},"src":"photos/p.jpg"}]#' \
+            "$tmp/poster.json" > "$tmp/Photo.printnest/project.json"
           $cli validate "$tmp/Photo.printnest/project.json"
           for d in out2 out3; do
             $cli export "$tmp/Photo.printnest" --profile kiosk --out "$tmp/$d"
@@ -131,6 +132,15 @@ jobs:
               "$tmp/out3/Untitled - print shop/Untitled - print shop.pdf"
           if grep -q "Exif" "$tmp/out2/Untitled - kiosk/Untitled.jpg"; then
             echo "::error::exported JPEG contains EXIF metadata"; exit 1
+          fi
+          # A book exports its interior and a separate cover; kiosk is refused.
+          mkdir "$tmp/Book.printnest" "$tmp/out4"
+          $cli new book-20x20 --out "$tmp/Book.printnest/project.json" --title "Book"
+          $cli export "$tmp/Book.printnest" --profile shop --out "$tmp/out4"
+          test -s "$tmp/out4/Book - print shop/Book - print shop.pdf"
+          test -s "$tmp/out4/Book - print shop/Book - cover.pdf"
+          if $cli export "$tmp/Book.printnest" --profile kiosk --out "$tmp/out4"; then
+            echo "::error::a book was exported for a kiosk"; exit 1
           fi
           if find "$tmp" -name '*.partial' | grep -q .; then
             echo "::error::partial files left behind"; exit 1
