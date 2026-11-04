@@ -72,6 +72,7 @@ fn kiosk_jpeg_is_exact_size_without_metadata() {
         prod,
         Profile::Kiosk,
         &dir,
+        None,
         &sizes(),
         &mut loader(),
         &mut no_progress(),
@@ -99,6 +100,7 @@ fn kiosk_jpeg_is_exact_size_without_metadata() {
         prod,
         Profile::Kiosk,
         &dir,
+        None,
         &sizes(),
         &mut loader(),
         &mut no_progress(),
@@ -123,6 +125,7 @@ fn print_shop_pdf_has_bleed_and_marks() {
         prod,
         Profile::PrintShop,
         &dir,
+        None,
         &sizes(),
         &mut loader(),
         &mut no_progress(),
@@ -150,6 +153,7 @@ fn home_pdf_fits_or_tiles() {
         prod,
         Profile::Home(Paper::A4),
         &dir,
+        None,
         &sizes(),
         &mut loader(),
         &mut no_progress(),
@@ -160,11 +164,14 @@ fn home_pdf_fits_or_tiles() {
     assert!(s.contains("/Count 1"));
     // An A4 poster goes on one A4 sheet (shrunk to the printable area).
     let a4 = cat.product("poster-a4").unwrap();
-    assert_eq!(home_pages(a4, Paper::A4, 1).len(), 1);
+    assert_eq!(
+        home_pages(a4.trim().width.0, a4.trim().height.0, Paper::A4, 1).len(),
+        1
+    );
     // An A3 poster needs several A4 sheets (layout checked without the
     // slow full-size render).
     let a3 = cat.product("poster-a3").unwrap();
-    let pages = home_pages(a3, Paper::A4, 1);
+    let pages = home_pages(a3.trim().width.0, a3.trim().height.0, Paper::A4, 1);
     assert!(
         pages.len() >= 4,
         "A3 on A4 takes several sheets, got {}",
@@ -188,7 +195,7 @@ fn every_tile_page_covers_its_window() {
     // Tiles must cover the whole design with overlap: check geometry.
     let cat = Catalogue::builtin().unwrap();
     let prod = cat.product("poster-a2").unwrap();
-    let pages = home_pages(prod, Paper::A4, 1);
+    let pages = home_pages(prod.trim().width.0, prod.trim().height.0, Paper::A4, 1);
     assert!(pages.len() > 1);
     for pg in &pages {
         let clip = pg.ops.iter().find_map(|o| match o {
@@ -212,6 +219,7 @@ fn cancelling_stops_the_export() {
         prod,
         Profile::Kiosk,
         &dir,
+        None,
         &sizes(),
         &mut loader(),
         &mut |_, _| false,
@@ -243,6 +251,7 @@ fn undecodable_photos_are_reported_and_cancel_cleans_up() {
         prod,
         Profile::Kiosk,
         &dir,
+        None,
         &sizes(),
         &mut |_: &str, _: u32| None,
         &mut no_progress(),
@@ -256,6 +265,7 @@ fn undecodable_photos_are_reported_and_cancel_cleans_up() {
         prod,
         Profile::Kiosk,
         &dir,
+        None,
         &HashMap::new(),
         &mut loader(),
         &mut no_progress(),
@@ -275,6 +285,7 @@ fn undecodable_photos_are_reported_and_cancel_cleans_up() {
         prod,
         Profile::PrintShop,
         &dir,
+        None,
         &sizes(),
         &mut loader(),
         &mut no_progress(),
@@ -290,4 +301,64 @@ fn long_titles_fit_file_name_limits() {
     let name = safe_base_name(&"\u{20000}".repeat(60));
     assert!(name.len() <= 100, "{}", name.len());
     assert!(format!("{name} - print shop.pdf.partial").len() < 255);
+}
+
+#[test]
+fn books_export_interior_and_cover() {
+    let cat = Catalogue::builtin().unwrap();
+    let prod = cat.product("book-20x20").unwrap();
+    let mut p = Project::new_blank(&cat, "book-20x20", "Holiday").unwrap();
+    // Photo on the front cover panel.
+    if let Some(cover) = p.cover_design.as_mut() {
+        cover.elements.push(Element::Photo {
+            id: "c".into(),
+            rect: Rect {
+                x: 250.0,
+                y: 20.0,
+                w: 150.0,
+                h: 150.0,
+                rotation: 0.0,
+            },
+            src: Some(SafePath::new("photos/a.jpg").unwrap()),
+            crop: Crop::default(),
+        });
+    }
+    let dir = tmp("book");
+    let rep = export(
+        &p,
+        prod,
+        Profile::PrintShop,
+        &dir,
+        cover_geometry(&p, &cat),
+        &sizes(),
+        &mut loader(),
+        &mut no_progress(),
+        &|| false,
+    )
+    .unwrap();
+    let names: Vec<String> = rep
+        .files
+        .iter()
+        .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names.contains(&"Holiday - print shop.pdf".to_owned()),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"Holiday - cover.pdf".to_owned()),
+        "{names:?}"
+    );
+    let cover = fs::read(rep.folder.join("Holiday - cover.pdf")).unwrap();
+    let s = String::from_utf8_lossy(&cover);
+    assert!(s.contains("/Count 1") && s.contains("/TrimBox"));
+    // Crop marks (8) + spine marks (4).
+    assert!(
+        s.matches(" l S Q").count() >= 12,
+        "{}",
+        s.matches(" l S Q").count()
+    );
+    let interior = fs::read(rep.folder.join("Holiday - print shop.pdf")).unwrap();
+    assert!(String::from_utf8_lossy(&interior).contains("/Count 20"));
+    let _ = fs::remove_dir_all(&dir);
 }

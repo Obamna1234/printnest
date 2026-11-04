@@ -402,6 +402,7 @@ fn cmd_export(catalogue: &Catalogue, args: &[String]) -> Result<(), Failure> {
         product,
         profile,
         out,
+        printnest_export::cover_geometry(&project, catalogue),
         &sizes,
         &mut loader,
         &mut progress,

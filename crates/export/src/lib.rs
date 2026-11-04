@@ -17,11 +17,13 @@ pub mod pdf;
 pub mod preflight;
 
 use image::codecs::jpeg::{JpegEncoder, PixelDensity};
+use printnest_layout::book::CoverGeometry;
 use printnest_model::catalogue::Product;
 use printnest_model::project::Project;
 use printnest_model::safe_path::SafePath;
 use printnest_render::{
-    Area, Photo, Raster, RenderError, fit_budget, needed_edge, page_pixels, render_page,
+    Area, Canvas, Photo, Raster, RenderError, canvas_pixels, fit_budget, needed_edge_on,
+    page_pixels, render_canvas,
 };
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -254,9 +256,8 @@ pub fn choose_ppi(product: &Product, area: Area, max_edge: u32) -> f64 {
 /// the per-page memory budget. Photos that fail to load go in `missing`.
 #[allow(clippy::too_many_arguments)]
 fn render(
-    project: &Project,
-    product: &Product,
-    i: usize,
+    pg: &printnest_model::project::Page,
+    canvas: Canvas,
     ppi: f64,
     area: Area,
     sizes: &HashMap<String, (u32, u32)>,
@@ -264,29 +265,25 @@ fn render(
     cancelled: &dyn Fn() -> bool,
     missing: &mut Vec<String>,
 ) -> Result<Raster, ExportError> {
-    let srcs: Vec<String> = project
-        .pages
-        .get(i)
-        .map(|p| {
-            let set: std::collections::BTreeSet<String> = p
-                .elements
-                .iter()
-                .filter_map(|e| match e {
-                    printnest_model::project::Element::Photo { src: Some(s), .. } => {
-                        Some(s.as_str().to_owned())
-                    }
-                    printnest_model::project::Element::Photo { .. }
-                    | printnest_model::project::Element::Text { .. } => None,
-                })
-                .collect();
-            set.into_iter().collect()
-        })
-        .unwrap_or_default();
+    let srcs: Vec<String> = {
+        let set: std::collections::BTreeSet<String> = pg
+            .elements
+            .iter()
+            .filter_map(|e| match e {
+                printnest_model::project::Element::Photo { src: Some(s), .. } => {
+                    Some(s.as_str().to_owned())
+                }
+                printnest_model::project::Element::Photo { .. }
+                | printnest_model::project::Element::Text { .. } => None,
+            })
+            .collect();
+        set.into_iter().collect()
+    };
     let mut wanted = Vec::new();
     for src in &srcs {
         match sizes.get(src) {
             Some(&(w, h)) if w > 0 && h > 0 => {
-                let edge = needed_edge(project, i, src, (w, h), ppi, MAX_PHOTO_EDGE);
+                let edge = needed_edge_on(pg, src, (w, h), ppi, MAX_PHOTO_EDGE);
                 let aspect = f64::from(w.min(h)) / f64::from(w.max(h));
                 wanted.push((src.clone(), edge, aspect));
             }
@@ -315,7 +312,7 @@ fn render(
             }
         }
     }
-    match render_page(project, product, i, photos, ppi, area, cancelled) {
+    match render_canvas(pg, canvas, photos, ppi, area, cancelled) {
         Ok(r) => Ok(r),
         Err(RenderError::Cancelled) => Err(ExportError::Cancelled),
         Err(e) => Err(e.into()),
@@ -323,7 +320,8 @@ fn render(
 }
 
 /// Exports `project` for `profile` into a new folder inside `parent`.
-/// `sizes` holds each photo's full-resolution size (from the sandbox's
+/// `cover` is the book cover's layout ([`cover_geometry`]); without it no
+/// cover file is made. `sizes` holds each photo's full-resolution size (from the sandbox's
 /// probe); photos without one are treated as missing. On any failure or
 /// cancellation the new folder is removed again.
 ///
@@ -335,6 +333,7 @@ pub fn export(
     product: &Product,
     profile: Profile,
     parent: &Path,
+    cover: Option<CoverGeometry>,
     sizes: &HashMap<String, (u32, u32)>,
     loader: &mut PhotoLoader<'_>,
     progress: &mut Progress<'_>,
@@ -343,7 +342,7 @@ pub fn export(
     let base = safe_base_name(&project.title);
     let folder = new_folder(parent, &base, profile.folder_suffix())?;
     let result = export_into(
-        project, product, profile, &folder, &base, sizes, loader, progress, cancelled,
+        project, product, profile, &folder, &base, cover, sizes, loader, progress, cancelled,
     );
     if result.is_err() {
         // Only ever our own, freshly created folder.
@@ -359,6 +358,7 @@ fn export_into(
     profile: Profile,
     folder: &Path,
     base: &str,
+    cover: Option<CoverGeometry>,
     sizes: &HashMap<String, (u32, u32)>,
     loader: &mut PhotoLoader<'_>,
     progress: &mut Progress<'_>,
@@ -393,10 +393,13 @@ fn export_into(
         None => None,
     };
     for i in 0..pages {
+        let pg = project
+            .pages
+            .get(i)
+            .ok_or(ExportError::Render(RenderError::NoPage(i)))?;
         let raster = render(
-            project,
-            product,
-            i,
+            pg,
+            Canvas::page(product),
             ppi,
             area,
             sizes,
@@ -433,24 +436,71 @@ fn export_into(
         }
     }
     if let (Some(w_pdf), Some(name)) = (pdf, pdf_name) {
+        let t = product.trim();
         let pdf_pages = match profile {
-            Profile::Home(paper) => home_pages(product, paper, pages),
-            Profile::PrintShop | Profile::Kiosk => shop_pages(product, pages),
+            Profile::Home(paper) => home_pages(t.width.0, t.height.0, paper, pages),
+            Profile::PrintShop | Profile::Kiosk => shop_pages(Canvas::page(product), pages, None),
         };
-        let buf = w_pdf.finish(&project.title, &pdf_pages).map_err(io)?;
-        let f = buf.into_inner().map_err(|e| io(e.error()))?;
-        f.sync_all().map_err(io)?;
-        drop(f);
-        let path = folder.join(name);
-        let tmp = partial_path(&path);
-        let placed = match fs::hard_link(&tmp, &path) {
-            Ok(()) => fs::remove_file(&tmp),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
-            Err(_) if fs::symlink_metadata(&path).is_err() => fs::rename(&tmp, &path),
-            Err(e) => Err(e),
+        files.push(finish_pdf(
+            w_pdf,
+            &project.title,
+            &pdf_pages,
+            &folder.join(name),
+        )?);
+    }
+    // Books: the cover is a separate file (printers handle it apart).
+    if let (Some(cover), Some(geom)) = (&project.cover_design, cover)
+        && !matches!(profile, Profile::Kiosk)
+    {
+        let canvas = Canvas {
+            width: geom.width,
+            height: geom.height,
+            outer: geom.outer,
         };
-        placed.map_err(io)?;
-        files.push(path);
+        let (area, cover_ppi) = match profile {
+            Profile::PrintShop => (Area::Artwork, choose_canvas_ppi(canvas, Area::Artwork)),
+            Profile::Home(_) | Profile::Kiosk => {
+                (Area::Trim, choose_canvas_ppi(canvas, Area::Trim))
+            }
+        };
+        let raster = render(
+            cover,
+            canvas,
+            cover_ppi,
+            area,
+            sizes,
+            loader,
+            cancelled,
+            &mut missing,
+        )?;
+        let jpeg = encode_jpeg(&raster, cover_ppi)?;
+        let (name, sheets) = match profile {
+            Profile::Home(paper) => (
+                format!("{base} - cover - {}.pdf", paper.name()),
+                home_pages(geom.width, geom.height, paper, 1),
+            ),
+            Profile::PrintShop | Profile::Kiosk => (
+                format!("{base} - cover.pdf"),
+                shop_pages(canvas, 1, Some((geom.spine_x0, geom.spine_x1))),
+            ),
+        };
+        let path = folder.join(&name);
+        let f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(partial_path(&path))
+            .map_err(io)?;
+        let mut w = pdf::Writer::new(std::io::BufWriter::new(f)).map_err(io)?;
+        w.add_image(&pdf::Jpeg {
+            width: raster.width,
+            height: raster.height,
+            data: jpeg,
+        })
+        .map_err(io)?;
+        files.push(finish_pdf(w, &project.title, &sheets, &path)?);
+        if !progress(pages, pages) || cancelled() {
+            return Err(ExportError::Cancelled);
+        }
     }
     let note = match profile {
         Profile::Kiosk => Some(kiosk_note(project, product, pages)),
@@ -469,6 +519,52 @@ fn export_into(
         ppi,
         missing,
     })
+}
+
+/// The book cover's layout for `project`, if it has one (pass the result
+/// to [`export`]).
+#[must_use]
+pub fn cover_geometry(
+    project: &Project,
+    catalogue: &printnest_model::Catalogue,
+) -> Option<CoverGeometry> {
+    let product = catalogue.product(&project.product)?;
+    let paper = catalogue.paper(&project.paper)?;
+    let pages = u32::try_from(project.pages.len()).ok()?;
+    project.cover_design.as_ref()?;
+    CoverGeometry::new(product, pages, paper, project.cover.as_deref()?)
+}
+
+/// Like [`choose_ppi`] for any canvas (e.g. a book cover).
+fn choose_canvas_ppi(canvas: Canvas, area: Area) -> f64 {
+    let mut ppi = TARGET_PPI;
+    while ppi > 30.0 && canvas_pixels(canvas, area, ppi).is_err() {
+        ppi = (ppi * 0.9).floor();
+    }
+    ppi.max(30.0)
+}
+
+/// Finishes a streamed PDF and moves it into place without replacing
+/// anything.
+fn finish_pdf(
+    w: pdf::Writer<std::io::BufWriter<fs::File>>,
+    title: &str,
+    pages: &[pdf::Page],
+    path: &Path,
+) -> Result<PathBuf, ExportError> {
+    let buf = w.finish(title, pages).map_err(io)?;
+    let f = buf.into_inner().map_err(|e| io(e.error()))?;
+    f.sync_all().map_err(io)?;
+    drop(f);
+    let tmp = partial_path(path);
+    let placed = match fs::hard_link(&tmp, path) {
+        Ok(()) => fs::remove_file(&tmp),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
+        Err(_) if fs::symlink_metadata(path).is_err() => fs::rename(&tmp, path),
+        Err(e) => Err(e),
+    };
+    placed.map_err(io)?;
+    Ok(path.to_path_buf())
 }
 
 fn size_text(product: &Product) -> String {
@@ -513,19 +609,20 @@ fn shop_note(product: &Product) -> String {
 }
 
 /// Print-shop pages: artwork (trim + bleed) with crop marks around it.
-fn shop_pages(product: &Product, n: usize) -> Vec<pdf::Page> {
+/// Print-shop sheets for `n` images of `canvas`, with crop marks, and
+/// spine fold marks for a book cover (`spine`: its x range on the trim).
+fn shop_pages(canvas: Canvas, n: usize, spine: Option<(f64, f64)>) -> Vec<pdf::Page> {
     use pdf::{Op, pt};
-    let t = product.trim();
-    let outer = product.bleed_mm + product.wrap_mm.unwrap_or(0.0);
+    let outer = canvas.outer;
     let margin = 12.0; // room for crop marks
-    let (aw, ah) = (t.width.0 + 2.0 * outer, t.height.0 + 2.0 * outer);
+    let (aw, ah) = (canvas.width + 2.0 * outer, canvas.height + 2.0 * outer);
     let media = (pt(aw + 2.0 * margin), pt(ah + 2.0 * margin));
     let (bx0, by0) = (pt(margin), pt(margin));
     let (bx1, by1) = (pt(margin + aw), pt(margin + ah));
     let (tx0, ty0) = (pt(margin + outer), pt(margin + outer));
     let (tx1, ty1) = (
-        pt(margin + outer + t.width.0),
-        pt(margin + outer + t.height.0),
+        pt(margin + outer + canvas.width),
+        pt(margin + outer + canvas.height),
     );
     let (gap, len) = (pt(outer + 2.0), pt(outer + 10.0));
     let mark = |from: (f64, f64), to: (f64, f64)| Op::Line {
@@ -552,6 +649,14 @@ fn shop_pages(product: &Product, n: usize) -> Vec<pdf::Page> {
                     ops.push(mark((x, y + vdir * gap), (x, y + vdir * len)));
                 }
             }
+            // Book covers: where the spine folds, outside the artwork.
+            if let Some((s0, s1)) = spine {
+                for x in [s0, s1] {
+                    let x = pt(margin + outer + x);
+                    ops.push(mark((x, by1 + pt(2.0)), (x, by1 + pt(8.0))));
+                    ops.push(mark((x, by0 - pt(2.0)), (x, by0 - pt(8.0))));
+                }
+            }
             pdf::Page {
                 media,
                 trim: Some([tx0, ty0, tx1, ty1]),
@@ -563,10 +668,8 @@ fn shop_pages(product: &Product, n: usize) -> Vec<pdf::Page> {
 }
 
 /// Home pages: the design at 100% on A4/Letter, tiled if it doesn't fit.
-fn home_pages(product: &Product, paper: Paper, n: usize) -> Vec<pdf::Page> {
+fn home_pages(dw: f64, dh: f64, paper: Paper, n: usize) -> Vec<pdf::Page> {
     use pdf::{Op, pt};
-    let t = product.trim();
-    let (dw, dh) = (t.width.0, t.height.0);
     let margin = 8.0; // most home printers can't print to the edge
     let overlap = 10.0;
     let (pw0, ph0) = paper.size_mm();

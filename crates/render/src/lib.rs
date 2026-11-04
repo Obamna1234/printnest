@@ -15,7 +15,7 @@ mod text;
 
 use printnest_layout::crop::crop_view;
 use printnest_model::catalogue::Product;
-use printnest_model::project::{Element, Project, Rect};
+use printnest_model::project::{Element, Page, Project, Rect};
 use std::collections::HashMap;
 use std::sync::Arc;
 use vello_cpu::color::{AlphaColor, PremulRgba8, Srgb};
@@ -103,6 +103,40 @@ pub enum RenderError {
     TooComplex,
 }
 
+/// The surface a page is drawn on: its trimmed size and the extra artwork
+/// around it (bleed, canvas wrap or a book cover's turn-in), in mm.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Canvas {
+    pub width: f64,
+    pub height: f64,
+    pub outer: f64,
+}
+
+impl Canvas {
+    /// An ordinary page of `product`.
+    #[must_use]
+    pub fn page(product: &Product) -> Self {
+        let t = product.trim();
+        Canvas {
+            width: t.width.0,
+            height: t.height.0,
+            outer: outer_mm(product),
+        }
+    }
+
+    /// Size of `area` in millimetres.
+    #[must_use]
+    pub fn area_mm(self, area: Area) -> (f64, f64) {
+        match area {
+            Area::Trim => (self.width, self.height),
+            Area::Artwork => (
+                self.width + 2.0 * self.outer,
+                self.height + 2.0 * self.outer,
+            ),
+        }
+    }
+}
+
 /// Millimetres from the artwork's top-left corner to the trim's.
 #[must_use]
 pub fn outer_mm(product: &Product) -> f64 {
@@ -112,14 +146,7 @@ pub fn outer_mm(product: &Product) -> f64 {
 /// Size of `area` in millimetres.
 #[must_use]
 pub fn area_mm(product: &Product, area: Area) -> (f64, f64) {
-    let t = product.trim();
-    match area {
-        Area::Trim => (t.width.0, t.height.0),
-        Area::Artwork => {
-            let o = outer_mm(product);
-            (t.width.0 + 2.0 * o, t.height.0 + 2.0 * o)
-        }
-    }
+    Canvas::page(product).area_mm(area)
 }
 
 /// Pixel size of `area` at `ppi`.
@@ -127,10 +154,18 @@ pub fn area_mm(product: &Product, area: Area) -> (f64, f64) {
 /// # Errors
 /// If `ppi` is out of range or the result is too large.
 pub fn page_pixels(product: &Product, area: Area, ppi: f64) -> Result<(u32, u32), RenderError> {
+    canvas_pixels(Canvas::page(product), area, ppi)
+}
+
+/// Pixel size of `area` of `canvas` at `ppi`.
+///
+/// # Errors
+/// If `ppi` is out of range or the result is too large.
+pub fn canvas_pixels(canvas: Canvas, area: Area, ppi: f64) -> Result<(u32, u32), RenderError> {
     if !(ppi.is_finite() && (30.0..=1200.0).contains(&ppi)) {
         return Err(RenderError::BadPpi);
     }
-    let (w, h) = area_mm(product, area);
+    let (w, h) = canvas.area_mm(area);
     let px = |mm: f64| (mm / 25.4 * ppi).round().max(1.0);
     let (pw, ph) = (px(w), px(h));
     let too_large = || RenderError::TooLarge(pw as u64, ph as u64);
@@ -189,9 +224,9 @@ fn to_pixmap(p: &Photo) -> Option<Pixmap> {
 }
 
 /// Maps millimetres on the page (trim origin) to output pixels.
-fn page_transform(product: &Product, area: Area, ppi: f64) -> Affine {
+fn page_transform(canvas: Canvas, area: Area, ppi: f64) -> Affine {
     let off = match area {
-        Area::Artwork => outer_mm(product),
+        Area::Artwork => canvas.outer,
         Area::Trim => 0.0,
     };
     Affine::scale(ppi / 25.4) * Affine::translate((off, off))
@@ -215,13 +250,29 @@ pub fn render_page(
     project: &Project,
     product: &Product,
     page: usize,
-    mut photos: HashMap<String, Arc<Photo>>,
+    photos: HashMap<String, Arc<Photo>>,
     ppi: f64,
     area: Area,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Raster, RenderError> {
     let pg = project.pages.get(page).ok_or(RenderError::NoPage(page))?;
-    let (w, h) = page_pixels(product, area, ppi)?;
+    render_canvas(pg, Canvas::page(product), photos, ppi, area, cancelled)
+}
+
+/// Renders `pg` on `canvas` (used for book covers, whose size depends on
+/// the spine). Same limits and behaviour as [`render_page`].
+///
+/// # Errors
+/// As [`render_page`].
+pub fn render_canvas(
+    pg: &Page,
+    canvas: Canvas,
+    mut photos: HashMap<String, Arc<Photo>>,
+    ppi: f64,
+    area: Area,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Raster, RenderError> {
+    let (w, h) = canvas_pixels(canvas, area, ppi)?;
     let (w16, h16) = (
         u16::try_from(w).map_err(|_| RenderError::TooLarge(u64::from(w), u64::from(h)))?,
         u16::try_from(h).map_err(|_| RenderError::TooLarge(u64::from(w), u64::from(h)))?,
@@ -232,14 +283,14 @@ pub fn render_page(
         num_threads: 0,
     };
     let mut ctx = RenderContext::new_with(w16, h16, settings);
-    let page_tf = page_transform(product, area, ppi);
+    let page_tf = page_transform(canvas, area, ppi);
 
     ctx.set_paint(colour(parse_colour(&pg.background)));
     ctx.fill_rect(&KRect::new(0.0, 0.0, f64::from(w), f64::from(h)));
 
     // Bound the work: total photo area painted, relative to the page.
     let page_area = {
-        let (aw, ah) = area_mm(product, area);
+        let (aw, ah) = canvas.area_mm(area);
         aw * ah
     };
     let painted: f64 = pg
@@ -361,6 +412,12 @@ pub fn needed_edge(
     let Some(pg) = project.pages.get(page) else {
         return 0;
     };
+    needed_edge_on(pg, src, size, ppi, max)
+}
+
+/// As [`needed_edge`] for any page (e.g. a book cover).
+#[must_use]
+pub fn needed_edge_on(pg: &Page, src: &str, size: (u32, u32), ppi: f64, max: u32) -> u32 {
     let mut need = 0.0f64;
     for el in &pg.elements {
         if let Element::Photo {

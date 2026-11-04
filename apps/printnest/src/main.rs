@@ -328,6 +328,7 @@ impl App {
                     self.export = Some(export_dialog::ExportDialog::new(
                         ed.project.clone(),
                         ed.product.clone(),
+                        printnest_export::cover_geometry(&ed.project, &self.catalogue),
                         ed.photo_sources(),
                     ));
                 }

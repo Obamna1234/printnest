@@ -7,7 +7,7 @@
 use crate::library::Origin;
 use eframe::egui;
 use printnest_export::{ExportReport, Issue, Paper, Profile, Severity};
-use printnest_model::catalogue::Product;
+use printnest_model::catalogue::{ExportProfile, Product};
 use printnest_model::project::Project;
 use printnest_model::safe_path::SafePath;
 use printnest_render::Photo;
@@ -41,6 +41,16 @@ const PROFILES: [(Profile, &str, &str); 4] = [
     ),
 ];
 
+/// Whether `product` can be printed this way (from the catalogue).
+fn offered(product: &Product, p: Profile) -> bool {
+    let wanted = match p {
+        Profile::Kiosk => ExportProfile::KioskJpeg,
+        Profile::PrintShop => ExportProfile::PrintPdf,
+        Profile::Home(_) => ExportProfile::Home,
+    };
+    product.exports.contains(&wanted)
+}
+
 enum Msg {
     Issues(Vec<Issue>, HashMap<String, (u32, u32)>),
     Progress(usize, usize),
@@ -64,6 +74,7 @@ pub enum Action {
 pub struct ExportDialog {
     project: Project,
     product: Product,
+    cover: Option<printnest_layout::book::CoverGeometry>,
     /// Where each photo's bytes are; project photos are re-checked on
     /// every read.
     sources: Arc<HashMap<String, Origin>>,
@@ -102,7 +113,12 @@ fn load_bytes(sources: &HashMap<String, Origin>, src: &str) -> Option<Vec<u8>> {
 
 impl ExportDialog {
     /// Opens the dialog and starts checking the design.
-    pub fn new(project: Project, product: Product, sources: HashMap<String, Origin>) -> Self {
+    pub fn new(
+        project: Project,
+        product: Product,
+        cover: Option<printnest_layout::book::CoverGeometry>,
+        sources: HashMap<String, Origin>,
+    ) -> Self {
         let (tx, rx) = channel();
         let sources = Arc::new(sources);
         let cancel = Arc::new(AtomicBool::new(false));
@@ -132,11 +148,17 @@ impl ExportDialog {
                 let _ = tx.send(Msg::Issues(issues, sizes));
             });
         }
+        let profile = PROFILES
+            .iter()
+            .map(|(p, _, _)| *p)
+            .find(|p| offered(&product, *p))
+            .unwrap_or(Profile::PrintShop);
         ExportDialog {
             project,
             product,
+            cover,
             sources,
-            profile: Profile::Kiosk,
+            profile,
             issues: None,
             sizes: Arc::new(HashMap::new()),
             stage: Stage::Choosing,
@@ -148,6 +170,7 @@ impl ExportDialog {
 
     /// Starts exporting into a new folder inside `parent`.
     pub fn start(&mut self, parent: PathBuf) {
+        let cover = self.cover;
         let (project, product, sources, tx, cancel, profile, sizes) = (
             self.project.clone(),
             self.product.clone(),
@@ -197,6 +220,7 @@ impl ExportDialog {
                 &product,
                 profile,
                 &parent,
+                cover,
                 &sizes,
                 &mut loader,
                 &mut progress,
@@ -242,9 +266,20 @@ impl ExportDialog {
             match &self.stage {
                 Stage::Choosing => {
                     ui.label(egui::RichText::new("How will you print it?").strong());
+                    let mut any = false;
                     for (p, name, help) in PROFILES {
+                        if !offered(&self.product, p) {
+                            continue;
+                        }
+                        any = true;
                         ui.radio_value(&mut self.profile, p, name);
                         ui.label(egui::RichText::new(help).small().weak());
+                    }
+                    if !any {
+                        ui.label(
+                            "Print templates for this product (mugs, shirts and other \
+                             gifts) arrive in a later version.",
+                        );
                     }
                     ui.separator();
                     ui.label(egui::RichText::new("Design check").strong());
@@ -298,7 +333,7 @@ impl ExportDialog {
                     }
                     ui.separator();
                     ui.horizontal(|ui| {
-                        let ready = self.issues.is_some();
+                        let ready = self.issues.is_some() && offered(&self.product, self.profile);
                         if ui
                             .add_enabled(ready, egui::Button::new("Choose folder and export…"))
                             .clicked()
