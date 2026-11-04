@@ -7,6 +7,7 @@ use crate::library::{Library, Origin, State};
 use crate::picker::display_name;
 use eframe::egui::{self, Color32, Pos2, Rect as ERect, Stroke, StrokeKind, Vec2};
 use printnest_document::ProjectFolder;
+use printnest_layout::book::{self, AutoPhoto, CoverGeometry, Layout, PageBox, inner_edge};
 use printnest_layout::crop::{crop_view, pan_by};
 use printnest_layout::edit;
 use printnest_layout::geometry::{self, Handle, Pt, corners};
@@ -105,6 +106,10 @@ pub struct Editor {
     show_bleed: bool,
     show_safe: bool,
     pub status: String,
+    /// The book cover's layout (spine position), if this is a book.
+    cover_geom: Option<CoverGeometry>,
+    /// Layout chosen in the toolbar picker.
+    layout: Layout,
 }
 
 impl std::fmt::Debug for Editor {
@@ -162,16 +167,138 @@ impl Editor {
             show_bleed: true,
             show_safe: true,
             status: String::new(),
+            cover_geom: None,
+            layout: Layout::Single,
         }
     }
 
     fn trim(&self) -> (f64, f64) {
+        if self.on_cover()
+            && let Some(g) = self.cover_geom
+        {
+            return (g.width, g.height);
+        }
         let t = self.product.trim();
         (t.width.0, t.height.0)
     }
 
     fn outer(&self) -> f64 {
+        if self.on_cover()
+            && let Some(g) = self.cover_geom
+        {
+            return g.outer;
+        }
         self.product.bleed_mm + self.product.wrap_mm.unwrap_or(0.0)
+    }
+
+    /// Measurements a layout needs for the page being edited.
+    fn page_box(&self, index: usize) -> PageBox {
+        let (w, h) = self.trim();
+        PageBox {
+            width: w,
+            height: h,
+            safe: self.product.safe_mm,
+            bleed: self.outer(),
+            gutter: self.product.gutter_mm.map(|g| (g, inner_edge(index))),
+        }
+    }
+
+    /// Replaces the current page with the chosen layout, keeping its photos
+    /// (in order) and text.
+    fn apply_layout(&mut self) {
+        if self.on_cover() {
+            return;
+        }
+        let photos: Vec<SafePath> = self
+            .elements()
+            .iter()
+            .filter_map(|e| match e {
+                Element::Photo { src: Some(s), .. } => Some(s.clone()),
+                Element::Photo { .. } | Element::Text { .. } => None,
+            })
+            .collect();
+        let dropped = photos.len().saturating_sub(self.layout.photos());
+        let before = self.project.clone();
+        let page_box = self.page_box(self.page);
+        if book::apply_layout(&mut self.project, self.page, self.layout, &photos, page_box) {
+            self.recorded(&before);
+            self.selected = None;
+            self.status = if dropped > 0 {
+                format!("Layout applied; {dropped} photo(s) didn't fit and stay in the tray.")
+            } else {
+                "Layout applied.".into()
+            };
+        }
+    }
+
+    /// Fills the book's empty pages with tray photos not used yet.
+    fn auto_fill(&mut self) {
+        let used: std::collections::HashSet<String> = self
+            .project
+            .photo_paths()
+            .iter()
+            .map(|p| p.as_str().to_owned())
+            .collect();
+        let photos: Vec<AutoPhoto> = self
+            .library
+            .list()
+            .into_iter()
+            .filter(|k| !used.contains(k.as_str()))
+            .map(|k| {
+                // Unknown sizes (not decoded yet) count as landscape.
+                let (width, height) = self
+                    .library
+                    .get(k.as_str())
+                    .and_then(|p| p.size)
+                    .unwrap_or((4, 3));
+                AutoPhoto {
+                    path: k,
+                    width,
+                    height,
+                }
+            })
+            .collect();
+        if photos.is_empty() {
+            self.status = "Add photos first: auto-fill uses the photos in the tray that aren't \
+                           on a page yet."
+                .into();
+            return;
+        }
+        let before = self.project.clone();
+        let boxes: Vec<PageBox> = (0..self.project.pages.len())
+            .map(|i| {
+                let t = self.product.trim();
+                PageBox {
+                    width: t.width.0,
+                    height: t.height.0,
+                    safe: self.product.safe_mm,
+                    bleed: self.product.bleed_mm + self.product.wrap_mm.unwrap_or(0.0),
+                    gutter: self.product.gutter_mm.map(|g| (g, inner_edge(i))),
+                }
+            })
+            .collect();
+        let fallback = boxes.first().copied();
+        let placed = book::auto_fill(&mut self.project, &photos, |i| {
+            boxes.get(i).copied().or(fallback).unwrap_or(PageBox {
+                width: 100.0,
+                height: 100.0,
+                safe: 5.0,
+                bleed: 3.0,
+                gutter: None,
+            })
+        });
+        if placed > 0 {
+            self.recorded(&before);
+            self.selected = None;
+        }
+        let left = photos.len() - placed;
+        self.status = match (placed, left) {
+            (0, _) => "No empty pages to fill.".into(),
+            (n, 0) => format!("Placed {n} photo(s) on empty pages."),
+            (n, l) => {
+                format!("Placed {n} photo(s); {l} didn't fit (add pages, or fill pages by hand).")
+            }
+        };
     }
 
     fn checkpoint(&mut self) {
@@ -223,21 +350,21 @@ impl Editor {
     }
 
     fn elements(&self) -> &[Element] {
-        self.project
-            .pages
-            .get(self.page)
-            .map_or(&[], |p| p.elements.as_slice())
+        edit::page(&self.project, self.page).map_or(&[], |p| p.elements.as_slice())
     }
 
     fn element_mut(&mut self, i: usize) -> Option<&mut Element> {
-        self.project
-            .pages
-            .get_mut(self.page)
-            .and_then(|p| p.elements.get_mut(i))
+        edit::page_mut(&mut self.project, self.page).and_then(|p| p.elements.get_mut(i))
+    }
+
+    /// True while the book cover is being edited.
+    fn on_cover(&self) -> bool {
+        self.page == edit::COVER
     }
 
     /// Adds picked photo files to the project (as frames) and the library.
     pub fn add_photo_files(&mut self, paths: Vec<std::path::PathBuf>) {
+        let multi_page = self.project.pages.len() > 1;
         let mut added = 0;
         for path in paths {
             let name = path
@@ -260,19 +387,29 @@ impl Editor {
                 continue;
             };
             self.library.add(key.clone(), Origin::External(path));
-            if self.place_photo(key) {
+            // Books (and other multi-page products) collect photos in the
+            // tray, ready for Auto-fill or clicking onto a page; single
+            // prints place them straight away.
+            if multi_page || self.place_photo(key) {
                 added += 1;
             }
         }
         if added > 0 {
-            self.status = format!("Added {added} photo(s). They load in the background.");
+            self.status = if multi_page {
+                format!(
+                    "Added {added} photo(s) to the tray. Use Auto-fill, or click a photo to \
+                     put it on this page."
+                )
+            } else {
+                format!("Added {added} photo(s). They load in the background.")
+            };
         }
     }
 
     /// Puts a photo into the selected empty frame, or a new frame.
     fn place_photo(&mut self, key: SafePath) -> bool {
         let (w, h) = self.trim();
-        let bleed = self.product.bleed_mm + self.product.wrap_mm.unwrap_or(0.0);
+        let bleed = self.outer();
         if let Some(i) = self.selected
             && let Some(Element::Photo { src: None, .. }) = self.elements().get(i)
         {
@@ -324,7 +461,7 @@ impl Editor {
         let Some(i) = self.selected else { return };
         if i < self.elements().len() {
             self.checkpoint();
-            if let Some(page) = self.project.pages.get_mut(self.page) {
+            if let Some(page) = edit::page_mut(&mut self.project, self.page) {
                 page.elements.remove(i);
             }
             self.selected = None;
@@ -348,6 +485,19 @@ impl Editor {
     pub fn ui(&mut self, ui: &mut egui::Ui, catalogue: &Catalogue, modal: bool) -> Vec<Request> {
         let mut requests = Vec::new();
         self.library.poll(ui.ctx());
+        self.cover_geom = self.project.cover.as_deref().and_then(|c| {
+            let paper = catalogue.paper(&self.project.paper)?;
+            let pages = u32::try_from(self.project.pages.len()).ok()?;
+            CoverGeometry::new(&self.product, pages, paper, c)
+        });
+        if self.on_cover() && (self.cover_geom.is_none() || self.project.cover_design.is_none()) {
+            self.page = 0;
+        }
+        // Undo/redo can change the page count under us.
+        if !self.on_cover() && self.page >= self.project.pages.len() {
+            self.page = self.project.pages.len().saturating_sub(1);
+            self.selected = None;
+        }
         if !modal {
             self.shortcuts(ui.ctx(), &mut requests);
         }
@@ -515,24 +665,100 @@ impl Editor {
             }
             ui.separator();
             let pages = self.project.pages.len();
-            if pages > 1 {
+            let has_cover = self.cover_geom.is_some() && self.project.cover_design.is_some();
+            if pages > 1 || has_cover {
+                let first = !has_cover && self.page == 0;
                 if ui
-                    .add_enabled(self.page > 0, egui::Button::new("< Prev"))
+                    .add_enabled(!self.on_cover() && !first, egui::Button::new("< Prev"))
                     .clicked()
                 {
-                    self.page -= 1;
+                    self.page = if self.page == 0 {
+                        edit::COVER
+                    } else {
+                        self.page - 1
+                    };
                     self.selected = None;
                 }
-                ui.label(format!("Page {} of {pages}", self.page + 1));
-                if ui
-                    .add_enabled(self.page + 1 < pages, egui::Button::new("Next >"))
-                    .clicked()
-                {
-                    self.page += 1;
+                if self.on_cover() {
+                    ui.label(egui::RichText::new("Cover").strong());
+                } else {
+                    ui.label(format!("Page {} of {pages}", self.page + 1));
+                }
+                let last = !self.on_cover() && self.page + 1 >= pages;
+                if ui.add_enabled(!last, egui::Button::new("Next >")).clicked() {
+                    self.page = if self.on_cover() { 0 } else { self.page + 1 };
                     self.selected = None;
+                }
+                if has_cover && !self.on_cover() && ui.button("Cover").clicked() {
+                    self.page = edit::COVER;
+                    self.selected = None;
+                }
+                let rule = self.product.page_rule();
+                if rule.max > rule.min && !self.on_cover() {
+                    let step = rule.step;
+                    if ui
+                        .button(format!("+{step} pages"))
+                        .on_hover_text("Add blank pages after this one")
+                        .clicked()
+                    {
+                        let before = self.project.clone();
+                        match book::add_pages(&mut self.project, rule, self.page) {
+                            Some(first) => {
+                                self.recorded(&before);
+                                self.page = first;
+                                self.selected = None;
+                            }
+                            None => {
+                                self.status =
+                                    format!("This book can have at most {} pages.", rule.max);
+                            }
+                        }
+                    }
+                    if ui
+                        .button(format!("-{step} pages"))
+                        .on_hover_text("Remove this page and the next (undo brings them back)")
+                        .clicked()
+                    {
+                        let before = self.project.clone();
+                        if book::remove_pages(&mut self.project, rule, self.page) {
+                            self.recorded(&before);
+                            self.page = self.page.min(self.project.pages.len().saturating_sub(1));
+                            self.selected = None;
+                        } else {
+                            self.status = format!(
+                                "This book needs at least {} pages (and pages to remove).",
+                                rule.min
+                            );
+                        }
+                    }
                 }
                 ui.separator();
             }
+            if !self.on_cover() {
+                egui::ComboBox::from_id_salt("layout")
+                    .selected_text(self.layout.name())
+                    .show_ui(ui, |ui| {
+                        for l in Layout::ALL {
+                            ui.selectable_value(&mut self.layout, l, l.name());
+                        }
+                    });
+                if ui
+                    .button("Apply layout")
+                    .on_hover_text("Rearrange this page; its photos and text are kept")
+                    .clicked()
+                {
+                    self.apply_layout();
+                }
+            }
+            if pages > 1
+                && ui
+                    .button("Auto-fill")
+                    .on_hover_text("Put the tray's unused photos on the empty pages, in order")
+                    .clicked()
+            {
+                self.auto_fill();
+            }
+            ui.separator();
             ui.checkbox(&mut self.show_bleed, "Bleed");
             ui.checkbox(&mut self.show_safe, "Safe zone");
             ui.add(
@@ -808,10 +1034,8 @@ impl Editor {
             // session in the text box.
             if !self.panel_edit_active {
                 let mut before = self.project.clone();
-                if let Some(slot) = before
-                    .pages
-                    .get_mut(self.page)
-                    .and_then(|p| p.elements.get_mut(i))
+                if let Some(slot) =
+                    edit::page_mut(&mut before, self.page).and_then(|p| p.elements.get_mut(i))
                 {
                     *slot = el_before;
                 }
@@ -1072,10 +1296,7 @@ impl Editor {
         let outer = self.outer();
         let artwork = ERect::from_min_size(art_min, art_size);
         let trim = view.rect(0.0, 0.0, tw, th);
-        let bg = self
-            .project
-            .pages
-            .get(self.page)
+        let bg = edit::page(&self.project, self.page)
             .map_or(Color32::WHITE, |p| parse_colour(&p.background));
         painter.rect_filled(artwork.expand(1.0), 0.0, Color32::from_gray(70));
         painter.rect_filled(artwork, 0.0, bg);
@@ -1141,16 +1362,44 @@ impl Editor {
                 );
             }
         }
+        if self.on_cover()
+            && let Some(g) = self.cover_geom
+        {
+            for x in [g.spine_x0, g.spine_x1] {
+                let pts = [
+                    view.to_screen(Pt::new(x, -outer)),
+                    view.to_screen(Pt::new(x, th + outer)),
+                ];
+                painter.extend(egui::Shape::dashed_line(
+                    &pts,
+                    Stroke::new(1.0, Color32::from_rgb(200, 120, 0)),
+                    5.0,
+                    4.0,
+                ));
+            }
+            for (x, label) in [
+                (g.spine_x0 / 2.0, "Back"),
+                ((g.spine_x0 + g.spine_x1) / 2.0, "Spine"),
+                ((g.spine_x1 + g.width) / 2.0, "Front"),
+            ] {
+                painter.text(
+                    view.to_screen(Pt::new(x, -outer)) - Vec2::new(0.0, 4.0),
+                    egui::Align2::CENTER_BOTTOM,
+                    label,
+                    egui::FontId::proportional(12.0),
+                    Color32::from_rgb(200, 120, 0),
+                );
+            }
+        }
+        let where_ = if self.on_cover() {
+            "cover (back · spine · front)".to_owned()
+        } else {
+            format!("page {} of {}", self.page + 1, self.project.pages.len())
+        };
         painter.text(
             artwork.center_bottom() + Vec2::new(0.0, 6.0),
             egui::Align2::CENTER_TOP,
-            format!(
-                "{:.0} × {:.0} mm · page {} of {}",
-                tw,
-                th,
-                self.page + 1,
-                self.project.pages.len()
-            ),
+            format!("{tw:.0} × {th:.0} mm · {where_}"),
             egui::FontId::proportional(12.0),
             Color32::from_gray(160),
         );

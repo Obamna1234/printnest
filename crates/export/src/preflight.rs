@@ -1,6 +1,7 @@
 //! Checks a design before export and explains anything that would print
 //! badly, in plain words.
 
+use printnest_layout::book::CoverGeometry;
 use printnest_layout::effective_ppi;
 use printnest_layout::geometry::corners;
 use printnest_model::catalogue::Product;
@@ -21,26 +22,35 @@ pub enum Severity {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Issue {
     pub severity: Severity,
-    /// 1-based page number.
+    /// 1-based page number; 0 is a book's cover.
     pub page: usize,
     pub message: String,
 }
 
-/// Runs every check. `sizes` maps each photo path to its full-resolution
-/// size; a path that isn't in it is treated as missing.
+/// Runs every check, on every page and (for books, given its layout) the
+/// cover, reported as page 0. `sizes` maps each photo path to its
+/// full-resolution size; a path that isn't in it is treated as missing.
 #[must_use]
 pub fn preflight(
     project: &Project,
     product: &Product,
+    cover: Option<CoverGeometry>,
     sizes: &HashMap<String, (u32, u32)>,
 ) -> Vec<Issue> {
     let t = product.trim();
-    let (tw, th) = (t.width.0, t.height.0);
-    let outer = product.bleed_mm + product.wrap_mm.unwrap_or(0.0);
+    let page_outer = product.bleed_mm + product.wrap_mm.unwrap_or(0.0);
     let safe = product.safe_mm;
     let mut out = Vec::new();
-    for (i, page) in project.pages.iter().enumerate() {
-        let n = i + 1;
+    let mut targets: Vec<(usize, &printnest_model::project::Page, f64, f64, f64)> = project
+        .pages
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (i + 1, p, t.width.0, t.height.0, page_outer))
+        .collect();
+    if let (Some(c), Some(g)) = (&project.cover_design, cover) {
+        targets.insert(0, (0, c, g.width, g.height, g.outer));
+    }
+    for (n, page, tw, th, outer) in targets {
         let mut push = |severity, message: String| {
             out.push(Issue {
                 severity,
@@ -216,7 +226,7 @@ mod tests {
             ("photos/gap.jpg".to_owned(), (4000, 4000)),
             ("photos/tiny.jpg".to_owned(), (300, 300)),
         ]);
-        let issues = preflight(&p, &prod, &sizes);
+        let issues = preflight(&p, &prod, None, &sizes);
         let msgs: Vec<&str> = issues.iter().map(|i| i.message.as_str()).collect();
         assert_eq!(issues.first().map(|i| i.severity), Some(Severity::Problem));
         assert!(msgs.iter().any(|m| m.contains("missing.jpg is missing")));
@@ -226,5 +236,30 @@ mod tests {
         assert!(msgs.iter().any(|m| m.contains("completely off the page")));
         assert!(msgs.iter().any(|m| m.contains("Edge text")));
         assert!(!msgs.iter().any(|m| m.contains("good.jpg")), "{msgs:?}");
+    }
+
+    #[test]
+    fn the_cover_is_checked_too() {
+        let cat = Catalogue::builtin().unwrap();
+        let prod = cat.product("book-20x20").unwrap().clone();
+        let mut p = Project::new_blank(&cat, "book-20x20", "b").unwrap();
+        let g = CoverGeometry::new(&prod, 20, cat.paper(&p.paper).unwrap(), "soft").unwrap();
+        if let Some(c) = p.cover_design.as_mut() {
+            c.elements
+                .push(photo(0.0, 0.0, g.width, g.height, Some("photos/small.jpg")));
+        }
+        let sizes = HashMap::from([("photos/small.jpg".to_owned(), (800, 400))]);
+        let issues = preflight(&p, &prod, Some(g), &sizes);
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.page == 0 && i.message.contains("small.jpg will print at")),
+            "{issues:?}"
+        );
+        assert!(
+            preflight(&p, &prod, None, &sizes)
+                .iter()
+                .all(|i| i.page != 0)
+        );
     }
 }

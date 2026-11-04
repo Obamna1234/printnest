@@ -11,6 +11,7 @@ pub fn new_id(project: &Project, prefix: &str) -> String {
     let used: HashSet<&str> = project
         .pages
         .iter()
+        .chain(project.cover_design.iter())
         .flat_map(|p| p.elements.iter().map(Element::id))
         .collect();
     let prefix: String = prefix
@@ -97,8 +98,26 @@ pub fn retarget_photo(project: &mut Project, old: &SafePath, new: &SafePath) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageFull;
 
-fn page_mut(project: &mut Project, page: usize) -> Option<&mut printnest_model::project::Page> {
-    project.pages.get_mut(page)
+/// Page index meaning "the book cover" (see `Project::cover_design`).
+pub const COVER: usize = usize::MAX;
+
+/// Page `page` of the project, or its cover for [`COVER`].
+#[must_use]
+pub fn page(project: &Project, page: usize) -> Option<&printnest_model::project::Page> {
+    if page == COVER {
+        project.cover_design.as_ref()
+    } else {
+        project.pages.get(page)
+    }
+}
+
+/// Mutable [`page`].
+pub fn page_mut(project: &mut Project, page: usize) -> Option<&mut printnest_model::project::Page> {
+    if page == COVER {
+        project.cover_design.as_mut()
+    } else {
+        project.pages.get_mut(page)
+    }
 }
 
 /// Adds a photo frame covering the whole page including bleed.
@@ -210,9 +229,7 @@ fn push(project: &mut Project, page: usize, el: Element) -> Result<usize, PageFu
 /// # Errors
 /// If the page is full or the element doesn't exist.
 pub fn duplicate(project: &mut Project, page: usize, idx: usize) -> Result<usize, PageFull> {
-    let el = project
-        .pages
-        .get(page)
+    let el = self::page(project, page)
         .and_then(|p| p.elements.get(idx))
         .cloned()
         .ok_or(PageFull)?;
@@ -340,6 +357,22 @@ mod tests {
         }
         assert_eq!(add_text(&mut p, 0, 210.0, 297.0, 6.0), Err(PageFull));
         assert_eq!(add_text(&mut p, 9, 210.0, 297.0, 6.0), Err(PageFull));
+    }
+
+    #[test]
+    fn the_cover_is_addressed_like_a_page() {
+        let cat = Catalogue::builtin().unwrap();
+        let mut p = Project::new_blank(&cat, "book-20x20", "b").unwrap();
+        let i = add_text(&mut p, COVER, 400.0, 200.0, 8.0).unwrap();
+        assert_eq!(page(&p, COVER).unwrap().elements.len(), 1);
+        let d = duplicate(&mut p, COVER, i).unwrap();
+        // Ids are unique across pages and cover.
+        add_text(&mut p, 0, 200.0, 200.0, 8.0).unwrap();
+        assert!(p.validate(&cat).is_ok(), "{:?}", p.validate(&cat));
+        assert_eq!(reorder(&mut p, COVER, d, false), Some(0));
+        // Products without a cover: COVER is simply absent.
+        let (_, mut poster) = proj();
+        assert!(add_text(&mut poster, COVER, 200.0, 200.0, 8.0).is_err());
     }
 
     #[test]

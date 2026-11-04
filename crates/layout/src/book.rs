@@ -291,6 +291,48 @@ fn new_id_avoiding(project: &Project, prefix: &str, pending: &[Element]) -> Stri
         .unwrap_or(base)
 }
 
+/// Adds `rule.step` blank pages after page `after` (0-based), if the
+/// product allows that many. Returns the index of the first new page.
+pub fn add_pages(
+    project: &mut Project,
+    rule: printnest_model::catalogue::PageRule,
+    after: usize,
+) -> Option<usize> {
+    let count = u32::try_from(project.pages.len()).ok()?;
+    let new_count = count.checked_add(rule.step)?;
+    if !rule.allows(new_count) {
+        return None;
+    }
+    let at = (after + 1).min(project.pages.len());
+    for _ in 0..rule.step {
+        project
+            .pages
+            .insert(at, printnest_model::project::Page::default());
+    }
+    Some(at)
+}
+
+/// Removes `rule.step` pages starting at `first`, if the product allows
+/// the smaller count and they all exist. Returns whether it did.
+pub fn remove_pages(
+    project: &mut Project,
+    rule: printnest_model::catalogue::PageRule,
+    first: usize,
+) -> bool {
+    let Ok(count) = u32::try_from(project.pages.len()) else {
+        return false;
+    };
+    let step = rule.step as usize;
+    let Some(new_count) = count.checked_sub(rule.step) else {
+        return false;
+    };
+    if !rule.allows(new_count) || first.saturating_add(step) > project.pages.len() {
+        return false;
+    }
+    project.pages.drain(first..first + step);
+    true
+}
+
 /// A photo for auto-fill: its path and pixel size.
 #[derive(Debug, Clone)]
 pub struct AutoPhoto {
@@ -504,5 +546,26 @@ mod tests {
             })
             .collect();
         assert_eq!(auto_fill(&mut q, &many, page_box), 80);
+    }
+
+    #[test]
+    fn pages_are_added_and_removed_in_allowed_steps() {
+        let (cat, mut p) = book();
+        let rule = cat.product("book-20x20").unwrap().page_rule();
+        apply_layout(&mut p, 0, Layout::Single, &[], page_box(0));
+        assert_eq!(add_pages(&mut p, rule, 0), Some(1));
+        assert_eq!(p.pages.len(), 22);
+        assert_eq!(p.pages[0].elements.len(), 1, "existing page kept");
+        assert!(p.pages[1].elements.is_empty() && p.pages[2].elements.is_empty());
+        assert!(p.validate(&cat).is_ok());
+        assert!(remove_pages(&mut p, rule, 1));
+        assert_eq!(p.pages.len(), 20);
+        // Can't go below the minimum or past the end.
+        assert!(!remove_pages(&mut p, rule, 0));
+        assert!(!remove_pages(&mut p, rule, 19));
+        // Or above the maximum.
+        while add_pages(&mut p, rule, 0).is_some() {}
+        assert_eq!(p.pages.len(), 100);
+        assert!(p.validate(&cat).is_ok());
     }
 }

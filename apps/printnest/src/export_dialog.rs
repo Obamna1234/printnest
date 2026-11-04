@@ -144,7 +144,7 @@ impl ExportDialog {
                         sizes.insert(src.as_str().to_owned(), (info.width, info.height));
                     }
                 }
-                let issues = printnest_export::preflight(&project, &product, &sizes);
+                let issues = printnest_export::preflight(&project, &product, cover, &sizes);
                 let _ = tx.send(Msg::Issues(issues, sizes));
             });
         }
@@ -311,10 +311,11 @@ impl ExportDialog {
                                         };
                                         ui.horizontal_wrapped(|ui| {
                                             ui.label(
-                                                egui::RichText::new(format!(
-                                                    "{tag} · page {}",
-                                                    i.page
-                                                ))
+                                                egui::RichText::new(if i.page == 0 {
+                                                    format!("{tag} · cover")
+                                                } else {
+                                                    format!("{tag} · page {}", i.page)
+                                                })
                                                 .color(colour)
                                                 .strong(),
                                             );

@@ -374,13 +374,19 @@ fn cmd_export(catalogue: &Catalogue, args: &[String]) -> Result<(), Failure> {
             sizes.insert(src.as_str().to_owned(), (info.width, info.height));
         }
     }
-    let issues = printnest_export::preflight(&project, product, &sizes);
+    let cover = printnest_export::cover_geometry(&project, catalogue);
+    let issues = printnest_export::preflight(&project, product, cover, &sizes);
     for i in &issues {
         let tag = match i.severity {
             Severity::Problem => "PROBLEM",
             Severity::Warning => "warning",
         };
-        eprintln!("{tag} (page {}): {}", i.page, i.message);
+        let place = if i.page == 0 {
+            "cover".to_owned()
+        } else {
+            format!("page {}", i.page)
+        };
+        eprintln!("{tag} ({place}): {}", i.message);
     }
 
     let mut loader = |src: &str, edge: u32| {
@@ -402,7 +408,7 @@ fn cmd_export(catalogue: &Catalogue, args: &[String]) -> Result<(), Failure> {
         product,
         profile,
         out,
-        printnest_export::cover_geometry(&project, catalogue),
+        cover,
         &sizes,
         &mut loader,
         &mut progress,
