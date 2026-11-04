@@ -41,7 +41,7 @@ pub enum Inner {
 /// The binding side of page `index` (0-based; page 1 is a right page).
 #[must_use]
 pub fn inner_edge(index: usize) -> Inner {
-    if index % 2 == 0 {
+    if index.is_multiple_of(2) {
         Inner::Left
     } else {
         Inner::Right
@@ -393,7 +393,7 @@ mod tests {
         let spine = prod.spine_width(20, paper, "hard").unwrap().0;
         assert!((g.width - (400.0 + spine)).abs() < 1e-9);
         assert!((g.spine_x1 - g.spine_x0 - spine).abs() < 1e-9);
-        assert_eq!(g.front().0, g.spine_x1);
+        assert!((g.front().0 - g.spine_x1).abs() < 1e-12);
         assert!(g.outer >= 15.0, "hard covers fold round the boards");
         // More pages, thicker spine.
         let g2 = CoverGeometry::new(prod, 100, paper, "hard").unwrap();
@@ -449,7 +449,7 @@ mod tests {
             &mut p,
             0,
             Layout::ThreeFeature,
-            &[a.clone()],
+            std::slice::from_ref(&a),
             page_box(0)
         ));
         let els = &p.pages[0].elements;
