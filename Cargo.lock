@@ -2197,7 +2197,7 @@ dependencies = [
 
 [[package]]
 name = "printnest"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "eframe",
  "printnest-document",
@@ -2211,7 +2211,7 @@ dependencies = [
 
 [[package]]
 name = "printnest-cli"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "printnest-document",
  "printnest-export",
@@ -2222,7 +2222,7 @@ dependencies = [
 
 [[package]]
 name = "printnest-document"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "printnest-model",
  "printnest-sandbox",
@@ -2231,7 +2231,7 @@ dependencies = [
 
 [[package]]
 name = "printnest-export"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "image",
  "printnest-layout",
@@ -2242,7 +2242,7 @@ dependencies = [
 
 [[package]]
 name = "printnest-imaging"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "image",
  "printnest-model",
@@ -2251,14 +2251,14 @@ dependencies = [
 
 [[package]]
 name = "printnest-layout"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "printnest-model",
 ]
 
 [[package]]
 name = "printnest-model"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2268,7 +2268,7 @@ dependencies = [
 
 [[package]]
 name = "printnest-render"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "epaint_default_fonts",
  "image",
@@ -2281,7 +2281,7 @@ dependencies = [
 
 [[package]]
 name = "printnest-sandbox"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "image",
  "libc",

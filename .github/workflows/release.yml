@@ -1,6 +1,11 @@
 # Release pipeline (SPEC section 8).
 #
-# Trigger: a version tag (vX.Y.Z) on a commit that is on main.
+# Triggers:
+# - a signed, annotated version tag (vX.Y.Z or vX.Y.Z-beta.N) on main, or
+# - "Run workflow" (workflow_dispatch) on main by the repository owner,
+#   for maintainers without a signing key (e.g. on a phone). The version
+#   typed in must match Cargo.toml; the tag is created only when the
+#   owner publishes the draft release.
 # - Builds without caches (no cache poisoning of shipped binaries).
 # - Builds the Linux binary twice on separate runners and fails if the
 #   hashes differ (reproducibility check).
@@ -15,7 +20,12 @@ name: Release
 
 on:
   push:
-    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+", "v[0-9]+.[0-9]+.[0-9]+-*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (must match Cargo.toml, e.g. 0.1.0-beta.1)"
+        required: true
 
 permissions: read-all
 
@@ -43,12 +53,24 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Refuse tags that are not on main
+      - name: Refuse commits that are not on main
         run: |
           git fetch --no-tags origin main
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
-            || { echo "::error::Tag $GITHUB_REF_NAME is not on main"; exit 1; }
+            || { echo "::error::$GITHUB_REF_NAME is not on main"; exit 1; }
+      - name: Manual runs only by the owner, only from main
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          ACTOR: ${{ github.actor }}
+          OWNER: ${{ github.repository_owner }}
+          REF: ${{ github.ref }}
+        run: |
+          [ "$ACTOR" = "$OWNER" ] \
+            || { echo "::error::Only $OWNER can start a release"; exit 1; }
+          [ "$REF" = "refs/heads/main" ] \
+            || { echo "::error::Releases are built from main only"; exit 1; }
       - name: Tag must be annotated and signed (verified by GitHub)
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -64,12 +86,20 @@ jobs:
           [ "$verified" = "true" ] \
             || { echo "::error::$TAG signature is not verified by GitHub"; exit 1; }
           echo "Tag $TAG is signed and verified."
-      - name: Tag matches Cargo.toml version
+      - name: Version matches Cargo.toml
         id: version
+        env:
+          WANTED: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           v="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
-          [ "v$v" = "$GITHUB_REF_NAME" ] \
-            || { echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $v"; exit 1; }
+          [ "v$v" = "v${WANTED#v}" ] \
+            || { echo "::error::$WANTED does not match Cargo.toml version $v"; exit 1; }
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] \
+             && gh api "repos/$REPO/git/ref/tags/v$v" > /dev/null 2>&1; then
+            echo "::error::v$v is already released; bump the version first"; exit 1
+          fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
       - name: Source date for reproducible builds
         id: epoch
@@ -213,7 +243,8 @@ jobs:
               mkdir -p "$app/Contents/MacOS"
               cp "$bin/printnest" "$app/Contents/MacOS/PrintNest"
               cp "$bin/printnest-cli" "stage/$name/"
-              sed "s/@VERSION@/$v/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+              # macOS bundle versions must be numeric: 0.1.0-beta.1 -> 0.1.0.
+              sed "s/@VERSION@/${v%%-*}/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
               # Free ad-hoc signature with App Sandbox + Hardened Runtime.
               # The entitlements grant NO network access.
               codesign --force --options runtime --timestamp=none \
@@ -325,7 +356,12 @@ jobs:
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           draft: true
-          prerelease: ${{ startsWith(needs.guard.outputs.version, '0.') }}
+          # The tag is created (on this exact commit) when the draft is
+          # published.
+          tag_name: v${{ needs.guard.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: PrintNest ${{ needs.guard.outputs.version }}
+          prerelease: ${{ startsWith(needs.guard.outputs.version, '0.') || contains(needs.guard.outputs.version, '-') }}
           files: dist/*
           fail_on_unmatched_files: true
           body: |
