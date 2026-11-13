@@ -59,3 +59,9 @@ path = "fuzz_targets/worker_request.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "exif_date"
+path = "fuzz_targets/exif_date.rs"
+test = false
+doc = false

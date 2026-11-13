@@ -72,6 +72,7 @@ pub fn serve(input: &mut impl Read, output: &mut impl Write) -> Result<(), i32> 
             out.push(info.format.code());
             out.extend_from_slice(&info.width.to_le_bytes());
             out.extend_from_slice(&info.height.to_le_bytes());
+            out.extend_from_slice(&info.taken.unwrap_or(0).to_le_bytes());
             let (pw, ph, rgba) = preview.unwrap_or((0, 0, Vec::new()));
             out.extend_from_slice(&pw.to_le_bytes());
             out.extend_from_slice(&ph.to_le_bytes());

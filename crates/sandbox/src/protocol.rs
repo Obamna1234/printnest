@@ -4,14 +4,15 @@
 //! Integers are little-endian.
 //!
 //! Request:  b"PNQ1" | op: u8 | max_edge: u32 | len: u64 | len bytes
-//! Response: b"PNA1" | status: u8 | ...
+//! Response: b"PNA2" | status: u8 | ...
 //!   status 0 (ok):    format: u8 | width: u32 | height: u32
+//!                     | taken: u64 (YYYYMMDDHHMMSS, 0 = unknown)
 //!                     | preview_w: u32 | preview_h: u32 | preview_w*preview_h*4 bytes
 //!                     (preview fields are 0 for a probe)
 //!   status 1 (error): msg_len: u16 | msg_len bytes of UTF-8 (≤ 512)
 
 pub const REQUEST_MAGIC: &[u8; 4] = b"PNQ1";
-pub const RESPONSE_MAGIC: &[u8; 4] = b"PNA1";
+pub const RESPONSE_MAGIC: &[u8; 4] = b"PNA2";
 pub const MAX_ERROR_LEN: usize = 512;
 
 /// What the worker should do.
@@ -37,7 +38,7 @@ impl Op {
 /// Size of the fixed request header.
 pub const REQUEST_HEADER: usize = 4 + 1 + 4 + 8;
 /// Size of the fixed part of an OK response.
-pub const RESPONSE_OK_HEADER: usize = 4 + 1 + 1 + 4 * 4;
+pub const RESPONSE_OK_HEADER: usize = 4 + 1 + 1 + 4 * 2 + 8 + 4 * 2;
 
 /// Just the fixed request header; the photo bytes follow it unchanged, so
 /// the parent never needs a second copy of a large photo.

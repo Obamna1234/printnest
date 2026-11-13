@@ -15,6 +15,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod exif;
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
 use printnest_model::limits::{MAX_FILE_BYTES, MAX_IMAGE_PIXELS};
 use std::io::Cursor;
@@ -124,6 +125,8 @@ pub struct Info {
     pub format: Format,
     pub width: u32,
     pub height: u32,
+    /// When the photo was taken (EXIF), as `YYYYMMDDHHMMSS`.
+    pub taken: Option<u64>,
 }
 
 /// A decoded, downscaled preview in 8-bit RGBA.
@@ -170,9 +173,13 @@ fn open(
         return Err(DecodeError::TooManyPixels(w, h));
     }
     // A broken EXIF block must not stop an otherwise good photo.
-    let orientation = decoder
-        .orientation()
+    let exif = decoder.exif_metadata().ok().flatten();
+    let orientation = exif
+        .as_deref()
+        .and_then(image::metadata::Orientation::from_exif_chunk)
         .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let taken = exif.as_deref().and_then(exif::taken);
+    drop(exif);
     let (width, height) = if swaps_axes(orientation) {
         (h, w)
     } else {
@@ -184,6 +191,7 @@ fn open(
             format,
             width,
             height,
+            taken,
         },
         orientation,
     ))

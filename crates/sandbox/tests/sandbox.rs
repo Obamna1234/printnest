@@ -227,3 +227,22 @@ fn reported_confinement_matches_platform() {
         assert_ne!(c, printnest_sandbox::Confinement::Seccomp);
     }
 }
+
+#[test]
+fn the_capture_date_comes_back_from_the_sandbox() {
+    let w = worker();
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/dated-48x32.jpg"
+    ))
+    .unwrap();
+    let info = w.probe(&bytes).unwrap();
+    assert_eq!(info.taken, Some(20230704091500), "prefers DateTimeOriginal");
+    // A photo without a date has none.
+    let plain = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/gradient-40x30.png"
+    ))
+    .unwrap();
+    assert_eq!(w.probe(&plain).unwrap().taken, None);
+}

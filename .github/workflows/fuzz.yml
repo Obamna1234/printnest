@@ -36,7 +36,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [project_json, safe_path, catalogue_toml, image_decode, worker_response, worker_request]
+        target: [project_json, safe_path, catalogue_toml, image_decode, worker_response, worker_request, exif_date]
     steps:
       - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
@@ -62,6 +62,7 @@ jobs:
           mkdir -p "fuzz/corpus/${{ matrix.target }}"
           case "${{ matrix.target }}" in
             image_decode | worker_request) cp tests/fixtures/*.{jpg,png,webp,tiff} "fuzz/corpus/${{ matrix.target }}/" ;;
+            exif_date) cp tests/fixtures/rotated-64x48.jpg "fuzz/corpus/exif_date/" ;;
             catalogue_toml) cp catalogue/products.toml "fuzz/corpus/catalogue_toml/" ;;
           esac
       - name: Fuzz

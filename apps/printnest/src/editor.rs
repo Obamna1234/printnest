@@ -264,11 +264,20 @@ impl Editor {
             .iter()
             .map(|p| p.as_str().to_owned())
             .collect();
-        let photos: Vec<AutoPhoto> = self
+        // In the order the photos were taken (EXIF date); photos without a
+        // date follow in file-name order (camera names count up).
+        let mut unused: Vec<SafePath> = self
             .library
             .list()
             .into_iter()
             .filter(|k| !used.contains(k.as_str()))
+            .collect();
+        unused.sort_by_key(|k| {
+            let taken = self.library.get(k.as_str()).and_then(|p| p.taken);
+            (taken.unwrap_or(u64::MAX), k.as_str().to_owned())
+        });
+        let photos: Vec<AutoPhoto> = unused
+            .into_iter()
             .map(|k| {
                 // Unknown sizes (not decoded yet) count as landscape.
                 let (width, height) = self

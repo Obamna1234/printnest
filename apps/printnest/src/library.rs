@@ -62,6 +62,8 @@ pub struct Photo {
     /// Full-resolution size, as displayed (EXIF orientation applied); kept
     /// after eviction so print-quality badges stay correct.
     pub size: Option<(u32, u32)>,
+    /// When it was taken (EXIF, `YYYYMMDDHHMMSS`), once checked.
+    pub taken: Option<u64>,
     last_used: u64,
     /// Ticket of the decode in flight; answers with another ticket are
     /// stale (e.g. for a photo that has since been renamed) and ignored.
@@ -100,6 +102,8 @@ pub struct Library {
     /// Decodes queued or running.
     pending: usize,
     next_ticket: u64,
+    probes: Sender<(SafePath, Origin)>,
+    probed: Receiver<(String, Option<printnest_sandbox::Info>)>,
 }
 
 impl std::fmt::Debug for Library {
@@ -157,6 +161,25 @@ impl Library {
                 }
             }
         });
+        // A second thread does the cheap header checks, so dates and sizes
+        // arrive even for photos that are never drawn.
+        let (probes, probe_rx) = channel::<(SafePath, Origin)>();
+        let (probed_tx, probed) = channel();
+        std::thread::spawn(move || {
+            let worker = Worker::current_exe().ok();
+            while let Ok((key, origin)) = probe_rx.recv() {
+                let bytes = match &origin {
+                    Origin::External(path) => read_capped(path).ok(),
+                    Origin::Project(folder) => folder.read_photo(&key).ok(),
+                };
+                let info = bytes
+                    .zip(worker.as_ref())
+                    .and_then(|(b, w)| w.probe(&b).ok());
+                if probed_tx.send((key.as_str().to_owned(), info)).is_err() {
+                    break;
+                }
+            }
+        });
         Library {
             photos: BTreeMap::new(),
             jobs,
@@ -165,6 +188,8 @@ impl Library {
             texture_bytes: 0,
             pending: 0,
             next_ticket: 1,
+            probes,
+            probed,
         }
     }
 
@@ -173,6 +198,7 @@ impl Library {
         if self.photos.contains_key(key.as_str()) {
             return;
         }
+        let key_str = key.as_str().to_owned();
         self.photos.insert(
             key.as_str().to_owned(),
             (
@@ -181,11 +207,17 @@ impl Library {
                     state: State::Idle,
                     origin,
                     size: None,
+                    taken: None,
                     last_used: 0,
                     ticket: 0,
                 },
             ),
         );
+        // A quick header check in the background gives the size and date
+        // (for print-quality badges and date order) without decoding.
+        if let Some((k, photo)) = self.photos.get(key_str.as_str()) {
+            let _ = self.probes.send((k.clone(), photo.origin.clone()));
+        }
     }
 
     /// Marks `key` as drawn this frame and starts decoding it if needed
@@ -234,6 +266,7 @@ impl Library {
                     let bytes = p.rgba.len();
                     let image = egui::ColorImage::from_rgba_unmultiplied(size, &p.rgba);
                     photo.size = Some((p.info.width, p.info.height));
+                    photo.taken = photo.taken.or(p.info.taken);
                     self.texture_bytes = self.texture_bytes.saturating_add(bytes);
                     State::Ready {
                         texture: ctx.load_texture(
@@ -246,6 +279,12 @@ impl Library {
                 }
                 Err(e) => State::Failed(e),
             };
+        }
+        while let Ok((key, info)) = self.probed.try_recv() {
+            if let (Some((_, photo)), Some(info)) = (self.photos.get_mut(&key), info) {
+                photo.size = photo.size.or(Some((info.width, info.height)));
+                photo.taken = photo.taken.or(info.taken);
+            }
         }
         self.evict();
         if self.loading() > 0 {

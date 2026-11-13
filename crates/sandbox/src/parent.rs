@@ -7,7 +7,7 @@
 //! stderr discarded.
 
 use crate::protocol::{
-    MAX_ERROR_LEN, Op, RESPONSE_MAGIC, RESPONSE_OK_HEADER, request_header, u32_at,
+    MAX_ERROR_LEN, Op, RESPONSE_MAGIC, RESPONSE_OK_HEADER, request_header, u32_at, u64_at,
 };
 use printnest_imaging::{Format, Info, MAX_EDGE_PIXELS, MAX_PREVIEW_EDGE, Preview};
 use printnest_model::limits::{DECODE_TIMEOUT_SECS, MAX_FILE_BYTES, MAX_IMAGE_PIXELS};
@@ -287,8 +287,16 @@ fn parse_response(
         .copied()
         .and_then(Format::from_code)
         .ok_or(SandboxError::BadResponse("bad format"))?;
-    let field = |i: usize| u32_at(raw, 6 + 4 * i).ok_or(SandboxError::BadResponse("short header"));
-    let (width, height, pw, ph) = (field(0)?, field(1)?, field(2)?, field(3)?);
+    let short = || SandboxError::BadResponse("short header");
+    let field = |at: usize| u32_at(raw, at).ok_or_else(short);
+    let (width, height) = (field(6)?, field(10)?);
+    let taken_raw = u64_at(raw, 14).ok_or_else(short)?;
+    let (pw, ph) = (field(22)?, field(26)?);
+    let taken = match taken_raw {
+        0 => None,
+        v if printnest_imaging::exif::is_valid_taken(v) => Some(v),
+        _ => return Err(SandboxError::BadResponse("impossible date")),
+    };
     if width == 0
         || height == 0
         || width > MAX_EDGE_PIXELS
@@ -301,6 +309,7 @@ fn parse_response(
         format,
         width,
         height,
+        taken,
     };
     let pixels = raw.get(RESPONSE_OK_HEADER..).unwrap_or_default();
     match max_edge {
@@ -390,10 +399,18 @@ mod tests {
     use super::*;
 
     fn ok_header(format: u8, w: u32, h: u32, pw: u32, ph: u32) -> Vec<u8> {
+        ok_header_taken(format, w, h, 0, pw, ph)
+    }
+
+    fn ok_header_taken(format: u8, w: u32, h: u32, taken: u64, pw: u32, ph: u32) -> Vec<u8> {
         let mut v = RESPONSE_MAGIC.to_vec();
         v.push(0);
         v.push(format);
-        for x in [w, h, pw, ph] {
+        for x in [w, h] {
+            v.extend_from_slice(&x.to_le_bytes());
+        }
+        v.extend_from_slice(&taken.to_le_bytes());
+        for x in [pw, ph] {
             v.extend_from_slice(&x.to_le_bytes());
         }
         v
@@ -408,6 +425,9 @@ mod tests {
         r.extend(vec![7u8; 4 * 3 * 4]);
         let (_, p) = parse_response(&r, Some(4)).unwrap();
         assert_eq!(p.unwrap().2.len(), 48);
+        let r = ok_header_taken(1, 40, 30, 20240315123045, 0, 0);
+        let (info, _) = parse_response(&r, None).unwrap();
+        assert_eq!(info.taken, Some(20240315123045));
     }
 
     #[test]
@@ -438,6 +458,8 @@ mod tests {
                 None,
             ), // huge error len
             (RESPONSE_MAGIC.to_vec(), None),
+            (ok_header_taken(1, 10, 10, 20241399000000, 0, 0), None), // impossible date
+            (ok_header_taken(1, 10, 10, u64::MAX, 0, 0), None),
         ];
         for (i, (raw, max)) in cases.into_iter().enumerate() {
             assert!(
