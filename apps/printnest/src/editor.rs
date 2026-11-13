@@ -7,7 +7,7 @@ use crate::library::{Library, Origin, State};
 use crate::picker::display_name;
 use eframe::egui::{self, Color32, Pos2, Rect as ERect, Stroke, StrokeKind, Vec2};
 use printnest_document::ProjectFolder;
-use printnest_layout::book::{self, AutoPhoto, CoverGeometry, Layout, PageBox, inner_edge};
+use printnest_layout::book::{self, AutoPhoto, CoverGeometry, Inner, Layout, PageBox, inner_edge};
 use printnest_layout::crop::{crop_view, pan_by};
 use printnest_layout::edit;
 use printnest_layout::geometry::{self, Handle, Pt, corners};
@@ -108,6 +108,8 @@ pub struct Editor {
     pub status: String,
     /// The book cover's layout (spine position), if this is a book.
     cover_geom: Option<CoverGeometry>,
+    /// Show the facing page beside this one.
+    spread: bool,
     /// The project's paper (its thickness sets the spine).
     paper: Option<printnest_model::catalogue::Paper>,
     /// Layout chosen in the toolbar picker.
@@ -170,6 +172,7 @@ impl Editor {
             show_safe: true,
             status: String::new(),
             cover_geom: None,
+            spread: false,
             paper: None,
             layout: Layout::Single,
         }
@@ -799,6 +802,10 @@ impl Editor {
                     self.apply_layout();
                 }
             }
+            if pages > 2 && !self.on_cover() {
+                ui.checkbox(&mut self.spread, "Spread")
+                    .on_hover_text("Show the facing page, as the open book will look");
+            }
             if pages > 1
                 && ui
                     .button("Auto-fill")
@@ -1122,19 +1129,49 @@ impl Editor {
         let area = response.rect.shrink(24.0);
         let (tw, th) = self.trim();
         let outer = self.outer();
-        let full_w = (tw + 2.0 * outer) as f32;
+        // Spread view: the facing page sits beside this one, as in the book.
+        let partner = self.spread_partner();
+        let pages_w = if partner.is_some() { 2.0 * tw } else { tw };
+        // Where this page starts within the spread (right pages are second).
+        let cur_off = match (partner, inner_edge(self.page)) {
+            (Some(_), Inner::Left) => tw,
+            _ => 0.0,
+        };
+        let full_w = (pages_w + 2.0 * outer) as f32;
         let full_h = (th + 2.0 * outer) as f32;
         if area.width() <= 0.0 || area.height() <= 0.0 || full_w <= 0.0 {
             return;
         }
         let fit = (area.width() / full_w).min(area.height() / full_h);
         let scale = fit * self.view_zoom;
-        let art_size = Vec2::new(full_w, full_h) * scale;
-        let art_min = area.center() - art_size / 2.0 + self.view_pan;
+        let spread_size = Vec2::new(full_w, full_h) * scale;
+        let spread_min = area.center() - spread_size / 2.0 + self.view_pan;
+        let left_trim = spread_min + Vec2::splat(outer as f32 * scale);
         let view = View {
-            origin: art_min + Vec2::splat(outer as f32 * scale),
+            origin: left_trim + Vec2::new(cur_off as f32 * scale, 0.0),
             scale,
         };
+        let art_min = view.origin - Vec2::splat(outer as f32 * scale);
+        let art_size = Vec2::new((tw + 2.0 * outer) as f32, full_h) * scale;
+        let partner_view = partner.map(|p| {
+            let off = if cur_off > 0.0 { 0.0 } else { tw };
+            (
+                p,
+                View {
+                    origin: left_trim + Vec2::new(off as f32 * scale, 0.0),
+                    scale,
+                },
+            )
+        });
+        // Clicking the facing page switches to it.
+        if let (Some((p, pv)), true) = (partner_view, response.clicked())
+            && let Some(pos) = response.interact_pointer_pos()
+            && pv.rect(0.0, 0.0, tw, th).contains(pos)
+        {
+            self.page = p;
+            self.selected = None;
+            return;
+        }
 
         // Scroll: zoom the selected photo when hovering it, else the view.
         if response.hovered() {
@@ -1165,6 +1202,70 @@ impl Editor {
 
         self.handle_pointer(ui, &response, view);
         self.paint(&painter, view, art_min, art_size);
+        if let Some((p, pv)) = partner_view {
+            self.paint_partner(&painter, p, pv, outer);
+        }
+    }
+
+    /// The page facing this one in the open book, when the spread view is
+    /// on.
+    fn spread_partner(&self) -> Option<usize> {
+        if !self.spread || self.on_cover() {
+            return None;
+        }
+        book::spreads(self.project.pages.len())
+            .into_iter()
+            .find_map(|(l, r)| match (l, r) {
+                (Some(l), Some(r)) if l == self.page => Some(r),
+                (Some(l), Some(r)) if r == self.page => Some(l),
+                _ => None,
+            })
+    }
+
+    /// Draws the facing page (not editable; slightly faded), on top of
+    /// this page's bleed on that side, with the fold between them.
+    fn paint_partner(&self, painter: &egui::Painter, page: usize, view: View, outer: f64) {
+        let (tw, th) = self.trim();
+        let Some(pg) = self.project.pages.get(page) else {
+            return;
+        };
+        // Its trim plus bleed on the top, bottom and outside edge.
+        let is_left = inner_edge(page) == Inner::Right;
+        let (x0, x1) = if is_left {
+            (-outer, tw)
+        } else {
+            (0.0, tw + outer)
+        };
+        let area = view.rect(x0, -outer, x1 - x0, th + 2.0 * outer);
+        let p = painter.with_clip_rect(area);
+        p.rect_filled(area, 0.0, parse_colour(&pg.background));
+        for el in &pg.elements {
+            self.paint_element(&p, view, el, false);
+        }
+        p.rect_filled(
+            area,
+            0.0,
+            Color32::from_rgba_unmultiplied(255, 255, 255, 60),
+        );
+        let trim = view.rect(0.0, 0.0, tw, th);
+        p.rect_stroke(trim, 0.0, Stroke::new(1.0, TRIM), StrokeKind::Middle);
+        let fold_x = if is_left { tw } else { 0.0 };
+        painter.extend(egui::Shape::dashed_line(
+            &[
+                view.to_screen(Pt::new(fold_x, -outer)),
+                view.to_screen(Pt::new(fold_x, th + outer)),
+            ],
+            Stroke::new(1.0, Color32::from_gray(120)),
+            4.0,
+            4.0,
+        ));
+        painter.text(
+            trim.center_bottom() + Vec2::new(0.0, 6.0),
+            egui::Align2::CENTER_TOP,
+            format!("page {} (click to edit)", page + 1),
+            egui::FontId::proportional(11.0),
+            Color32::from_gray(150),
+        );
     }
 
     fn handle_pointer(&mut self, ui: &egui::Ui, response: &egui::Response, view: View) {

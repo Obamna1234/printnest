@@ -312,14 +312,14 @@ a human test print per minor release.
   box and crop marks, which shops accept. Revisit with colour management
   (soft-proof, M9).]
 - **M5 Photo books** — spreads, covers, spine, layouts, auto-layout.
-  [in progress: designable cover (back · spine · front, spine width from
-  page count, paper and cover type, guides in the editor); seven
-  original page layouts kept off the gutter; auto-fill of empty pages
-  from the tray (file-name order: camera names are date-ordered); add
-  or remove pages in the allowed steps; print-shop export as interior
-  PDF + separate cover PDF with crop and spine fold marks; design check
-  covers the cover. Still to do: side-by-side spread view, ordering by
-  the photo's own date (EXIF).]
+  [done: designable cover (back · spine · front, spine width from page
+  count, paper and cover type, front-cover items follow the spine);
+  spread view (facing page shown beside the one being edited); seven
+  original page layouts kept off the gutter; auto-fill of empty pages in
+  the order photos were taken (EXIF date, read only in the sandbox;
+  undated photos by file name); add/remove pages in allowed steps;
+  print-shop export as interior PDF + cover PDF with crop and spine fold
+  marks; design check covers the cover and spine folds.]
 - **M6 Wall decor** — framed prints + mats, canvas wrap templates.
 - **M7 Calendars and cards.**
 - **M8 Gifts.**
